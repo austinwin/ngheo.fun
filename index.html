@@ -33,7 +33,7 @@
 </head>
 <body class="text-white text-sm md:text-base">
   <!-- Toast Notification -->
-  <div id="toast" class="fixed bottom-5 right-5 bg-green-600 text-white py-2 px-4 rounded-lg shadow-lg hidden">
+  <div id="toast" class="fixed bottom-5 right-5 z-50 bg-green-600 text-white py-2 px-4 rounded-lg shadow-lg hidden">
     <p id="toast-message"></p>
   </div>
 
@@ -50,7 +50,7 @@
       <!-- Manual Trade Panel -->
       <div class="lg:col-span-2">
         <div class="glass rounded-2xl p-4 md:p-6 glow">
-          <div class="flex items-center justify-between mb-4">
+          <div class="flex items-center justify-between mb-4 gap-4">
             <h2 class="text-xl md:text-2xl font-bold flex items-center gap-2">
               <i class="fas fa-chart-line text-green-400"></i> Microloop
             </h2>
@@ -66,7 +66,7 @@
 
           <div class="grid grid-cols-12 gap-2 mb-4 items-end">
             <!-- Pair -->
-            <div class="col-span-4 md:col-span-3">
+            <div class="col-span-12">
               <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">Pair</label>
               <select id="pair" class="w-full px-2 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm">
                 <option>SOL/USD</option>
@@ -80,20 +80,20 @@
             </div>
 
             <!-- Leverage -->
-            <div class="col-span-3 md:col-span-2">
+            <div class="col-span-3">
               <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">Lev</label>
               <input type="number" id="leverage" value="20" min="1" max="50" class="w-full px-2 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm text-center"/>
             </div>
 
             <!-- Position Size USD -->
-            <div class="col-span-5 md:col-span-2">
+            <div class="col-span-4">
               <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">Size ($)</label>
               <input type="number" step="1" id="size_usd" value="50" min="1" class="w-full px-2 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm"/>
             </div>
 
             <!-- Take Profit Price -->
-            <div class="col-span-12 md:col-span-5">
-              <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">TP <span class="font-normal normal-case opacity-50">(Optional)</span></label>
+            <div class="col-span-5">
+              <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">TP <span class="font-normal normal-case opacity-50">(Opt)</span></label>
               <input type="number" step="0.01" id="tp_price" placeholder="Price" class="w-full px-3 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm"/>
             </div>
           </div>
@@ -179,7 +179,7 @@
       const toastMessage = document.getElementById("toast-message");
       
       toastMessage.textContent = message;
-      toast.className = `fixed bottom-5 right-5 text-white py-2 px-4 rounded-lg shadow-lg`; // Reset classes
+      toast.className = `fixed bottom-5 right-5 z-50 text-white py-2 px-4 rounded-lg shadow-lg`; // Reset classes
       if (isError) {
         toast.classList.add('bg-red-600');
       } else {
@@ -318,15 +318,15 @@
       // Current Price
       const price = parseFloat(data.current_price);
       priceEl.innerHTML = `
-        <div class="text-sm opacity-70">Current Price</div>
-        <div class="text-2xl font-bold">${price ? `$${price.toFixed(2)}` : 'N/A'}</div>
+        <div class="text-xs opacity-70 uppercase tracking-wide">Price</div>
+        <div class="text-xl md:text-2xl font-bold">${price ? `$${price.toFixed(2)}` : 'N/A'}</div>
       `;
 
       // Available Margin
       const margin = parseFloat(data.available_margin);
       marginEl.innerHTML = `
-        <div class="text-sm opacity-70">Available to Trade</div>
-        <div class="text-2xl font-bold">${margin ? `$${margin.toFixed(2)}` : '$0.00'}</div>
+        <div class="text-xs opacity-70 uppercase tracking-wide">Margin</div>
+        <div class="text-xl md:text-2xl font-bold">${margin ? `$${margin.toFixed(2)}` : '$0.00'}</div>
       `;
 
       // Open Position
@@ -336,16 +336,16 @@
         const pnl = parseFloat(pos.unrealizedPnl);
         const pnlColor = pnl >= 0 ? 'text-green-400' : 'text-red-400';
         positionEl.innerHTML = `
-          <div class="text-sm opacity-70">Open Position</div>
-          <div class="text-lg font-bold ${isLong ? 'text-green-400' : 'text-red-400'}">
-            ${isLong ? 'LONG' : 'SHORT'} ${parseFloat(pos.szi).toFixed(2)} ${pos.coin}
+          <div class="text-xs opacity-70 uppercase tracking-wide">Position</div>
+          <div class="text-base md:text-lg font-bold ${isLong ? 'text-green-400' : 'text-red-400'} leading-tight">
+            ${isLong ? 'LONG' : 'SHORT'} ${parseFloat(pos.szi).toFixed(2)}
           </div>
-          <div class="text-xs">Entry: $${parseFloat(pos.entryPx).toFixed(2)} | PnL: <span class="${pnlColor}">$${pnl.toFixed(2)}</span></div>
+          <div class="text-[10px] md:text-xs opacity-80 mt-0.5">@${parseFloat(pos.entryPx).toFixed(2)} • <span class="${pnlColor}">$${pnl.toFixed(2)}</span></div>
         `;
       } else {
         positionEl.innerHTML = `
-          <div class="text-sm opacity-70">Open Position</div>
-          <div class="text-2xl font-bold opacity-50">None</div>
+          <div class="text-xs opacity-70 uppercase tracking-wide">Position</div>
+          <div class="text-xl md:text-2xl font-bold opacity-50">-</div>
         `;
       }
 
@@ -357,18 +357,21 @@
         if (order.reduceOnly) {
              sideText = isBuy ? 'Close Short' : 'Close Long';
         }
+        // Shorten side text for mobile if needed
+        if (sideText === 'Close Short') sideText = 'Cl. Short';
+        if (sideText === 'Close Long') sideText = 'Cl. Long';
 
         ordersEl.innerHTML = `
-          <div class="text-sm opacity-70">Open Order</div>
-          <div class="text-lg font-bold ${isBuy ? 'text-green-400' : 'text-red-400'}">
-            ${sideText} ${parseFloat(order.sz).toFixed(2)} @ $${parseFloat(order.limitPx).toFixed(2)}
+          <div class="text-xs opacity-70 uppercase tracking-wide">Order</div>
+          <div class="text-base md:text-lg font-bold ${isBuy ? 'text-green-400' : 'text-red-400'} leading-tight">
+            ${sideText} ${parseFloat(order.sz).toFixed(2)}
           </div>
-           <div class="text-xs opacity-60">${data.open_orders.length > 1 ? `(+${data.open_orders.length - 1} more)`: ''}</div>
+           <div class="text-[10px] md:text-xs opacity-60 mt-0.5">@$${parseFloat(order.limitPx).toFixed(2)}${data.open_orders.length > 1 ? ` (+${data.open_orders.length - 1})`: ''}</div>
         `;
       } else {
         ordersEl.innerHTML = `
-          <div class="text-sm opacity-70">Open Orders</div>
-          <div class="text-2xl font-bold opacity-50">None</div>
+          <div class="text-xs opacity-70 uppercase tracking-wide">Orders</div>
+          <div class="text-xl md:text-2xl font-bold opacity-50">-</div>
         `;
       }
     }
