@@ -1,1456 +1,1234 @@
-import os
-# FastAPI wrapper (synchronous execution only)
-from fastapi import FastAPI, HTTPException, Query, Security, Depends, status
-import time
-import json
-import requests
-import sqlite3
-import uuid
-import numpy as np
-import pandas as pd
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from datetime import datetime, timezone
-from hyperliquid.info import Info
-from hyperliquid.exchange import Exchange
-from hyperliquid.utils import constants
-from eth_account import Account
-from dotenv import load_dotenv
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Microhyper</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+  <style>
+    body { background: linear-gradient(135deg, #0f0c29, #302b63, #24243e); min-height: 100vh; font-family: 'Segoe UI', sans-serif; }
+    .glass { background: rgba(255, 255, 255, 0.08); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.18); }
+    .glow { box-shadow: 0 0 14px rgba(139, 92, 246, 0.35); }
+    .btn-primary { transition: all 0.2s; }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(0,0,0,0.25); }
+    .signal-long { background: linear-gradient(45deg, #22c55e, #16a34a); }
+    .signal-short { background: linear-gradient(45deg, #ef4444, #dc2626); }
+    .pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
-from pydantic import BaseModel, Field
-from typing import Optional, List
-import talib
-from litellm import completion
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import APIKeyHeader
+    #toast {
+      transition: transform 0.5s ease-in-out, opacity 0.5s ease-in-out;
+      transform: translateY(-100px);
+      opacity: 0;
+    }
+    #toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
 
-# Setup logging
-# logging.basicConfig(filename='trade_log.txt', level=logging.INFO, format='%(asctime)s %(message)s')
-
-load_dotenv()
-
-# -------- Config --------
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-SYMBOL = os.getenv("SYMBOL", "SOL")
-BINANCE_FAPI= "https://fapi.binance.com/fapi/v1"
-HYPER_WALLET_ADDRESS = os.getenv("HYPER_WALLET_ADDRESS")
-HYPER_WALLET_KEY = os.getenv("HYPER_WALLET_KEY")
-API_ACCESS_TOKEN = os.getenv("API_ACCESS_TOKEN")
-
-# -------- Database Setup --------
-DB_NAME = "trades.db"
-
-def init_db():
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS ai_trade_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_id TEXT,
-                timestamp TEXT,
-                pair TEXT,
-                direction TEXT,
-                signal_output TEXT
-            )
-        ''')
-        conn.commit()
-        conn.close()
-        print(f"✅ Database initialized: {DB_NAME}")
-    except Exception as e:
-        print(f"❌ Database initialization failed: {e}")
-
-init_db()
-
-# Startup check for API Token
-if not API_ACCESS_TOKEN:
-    print("\n" + "!"*60)
-    print("CRITICAL WARNING: API_ACCESS_TOKEN is not set in .env file!")
-    print("All authenticated endpoints will fail with 500 error.")
-    print("!"*60 + "\n")
-else:
-    print(f"✅ API Access Token loaded: {API_ACCESS_TOKEN[:4]}***")
-
-session = requests.Session()
-retries = Retry(total=5, backoff_factor=1, status_forcelist=[502, 503, 504])
-session.mount('https://', HTTPAdapter(max_retries=retries))
-
-
-def fetch_klines(symbol, interval, limit=500):
-    """Fetch OHLCV data from Binance Futures API"""
-    params = {"symbol": f"{symbol}USDT", "interval": interval, "limit": limit}
-    url = f"{BINANCE_FAPI}/klines"
-    try:
-        r = session.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        df = pd.DataFrame(r.json(), columns=[
-            "open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_asset_volume", "number_of_trades",
-            "taker_buy_base", "taker_buy_quote", "ignore"
-        ])
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = df[col].astype(float)
-        df["open_time"] = pd.to_datetime(df["open_time"], unit='ms')
-        return df
-    except Exception as e:
-        logging.error(f"Failed to fetch klines: {e}")
-        raise
-
-# -------- Fetch Order Book --------
-def fetch_order_book(symbol, limit=20):
-    """Fetch order book depth"""
-    url = f"{BINANCE_FAPI}/depth?symbol={symbol}USDT&limit={limit}"
-    try:
-        r = session.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        return {
-            "bids": [[float(p), float(q)] for p, q in data["bids"]],
-            "asks": [[float(p), float(q)] for p, q in data["asks"]]
-        }
-    except Exception as e:
-        logging.error(f"Failed to fetch order book: {e}")
-        return {"bids": [], "asks": []}
-
-# -------- Fetch Recent Trades --------
-def fetch_recent_trades(symbol, limit=100):
-    """Fetch recent trades to analyze flow"""
-    url = f"{BINANCE_FAPI}/trades?symbol={symbol}USDT&limit={limit}"
-    try:
-        r = session.get(url, timeout=10)
-        r.raise_for_status()
-        trades = r.json()
-        return [{
-            "price": float(t["price"]),
-            "qty": float(t["qty"]),
-            "time": t["time"],
-            "isBuyerMaker": t["isBuyerMaker"]
-        } for t in trades]
-    except Exception as e:
-        logging.error(f"Failed to fetch trades: {e}")
-        return []
-
-def get_current_price(symbol):
-    """Fast fetch of current price from Hyperliquid"""
-    try:
-        info_client = Info(constants.MAINNET_API_URL, skip_ws=True)
-        all_mids = info_client.all_mids()
-        print(f"Fetched current price for {symbol}: {all_mids.get(symbol, 'N/A')}")
-        return float(all_mids.get(symbol, 0.0))
-    except Exception as e:
-        print(f"Error fetching price for {symbol}: {e}")
-        return 0.0
-
-def build_market_analysis(symbol):
-    """Compile comprehensive market data for the LLM"""
-    
-    # Fetch 1m and 5m klines
-    df_1m = fetch_klines(symbol, "1m", limit=400)
-    df_5m = fetch_klines(symbol, "5m", limit=400)
-    
-    current_price = df_1m["close"].iloc[-1]
-    
-    # Order book data
-    order_book = fetch_order_book(symbol)
-    
-    # Recent trades
-    trades = fetch_recent_trades(symbol, limit=75)
-    
-    # Prepare data structure for LLM
-    df_1m_serializable = df_1m.tail(60)[["open_time", "open", "high", "low", "close", "volume"]].copy()
-    df_1m_serializable['open_time'] = df_1m_serializable['open_time'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
-    
-    df_5m_serializable = df_5m.tail(50)[["open_time", "open", "high", "low", "close", "volume"]].copy()
-    df_5m_serializable['open_time'] = df_5m_serializable['open_time'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-    analysis_data = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "pair": f"{symbol}/USD",
-        "current_price": current_price,
-        "klines_1m": {
-            "ohlcv": df_1m_serializable.to_dict(orient="records")
-        },
-        "klines_5m": {
-            "ohlcv": df_5m_serializable.to_dict(orient="records")
-        },
-        "order_book": {
-            "bids": order_book["bids"][:20],
-            "asks": order_book["asks"][:20]
-        },
-        "recent_trades": trades[-75:]
+    /* Modal Styles */
+    #api-key-modal, #ai-response-modal {
+      transition: opacity 0.5s ease-in-out;
+      opacity: 0;
+    }
+    #api-key-modal.show, #ai-response-modal.show {
+      opacity: 1;
     }
     
-    return analysis_data
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.05); }
+    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
+  </style>
+</head>
+<body class="text-white text-sm md:text-base">
+  <!-- API Key Modal -->
+  <div id="api-key-modal" class="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center hidden">
+    <div class="glass p-6 rounded-2xl max-w-md w-full mx-4 shadow-2xl border border-violet-500/30">
+      <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+        <i class="fas fa-key text-violet-400"></i> Authentication Required
+      </h2>
+      <p class="text-sm opacity-70 mb-4">Please enter your API Access Token to continue.</p>
+      <input type="password" id="api-key-input" placeholder="Enter API Key" class="w-full px-4 py-3 rounded-lg bg-black/40 border border-white/10 focus:border-violet-500 focus:outline-none mb-4 text-white" />
+      
+      <input type="text" id="cf-client-id" placeholder="CF Access Client ID" class="w-full px-4 py-3 rounded-lg bg-black/40 border border-white/10 focus:border-violet-500 focus:outline-none mb-4 text-white" />
+      <input type="password" id="cf-client-secret" placeholder="CF Access Client Secret" class="w-full px-4 py-3 rounded-lg bg-black/40 border border-white/10 focus:border-violet-500 focus:outline-none mb-4 text-white" />
+      
+      <div class="mb-4">
+        <label class="text-[10px] uppercase tracking-wide opacity-60 mb-1 block">API Endpoint (CORS Proxy if needed)</label>
+        <input type="text" id="api-endpoint" placeholder="https://test.me" class="w-full px-4 py-3 rounded-lg bg-black/40 border border-white/10 focus:border-violet-500 focus:outline-none text-white text-xs" />
+      </div>
 
-# -------- AI Analysis --------
-def get_trading_signal(market_data, model=LLM_MODEL):
-    """AI-driven decision making with maximum analytical freedom"""
-    
-    klines_1m = market_data.get("klines_1m", {}).get("ohlcv", [])
-    if len(klines_1m) < 30:
-        return {"signal": "INSUFFICIENT_DATA", "confidence": "LOW", "rationale_short": "Need 30+ periods"}
-    
-    # Provide rich data for AI analysis
-    recent_data = klines_1m[-50:]  # Last 50 candles
-    closes = [c["close"] for c in recent_data]
-    highs = [c["high"] for c in recent_data]
-    lows = [c["low"] for c in recent_data]
-    current_price = market_data.get("current_price", closes[-1])
-    
-    # Calculate multiple perspectives for the AI to consider
-    ma_5 = sum(closes[-5:]) / 5
-    ma_10 = sum(closes[-10:]) / 10
-    ma_20 = sum(closes[-20:]) / 20
-    
-    # Recent price action context
-    highest_10 = max(highs[-10:])
-    lowest_10 = min(lows[-10:])
-    price_position = (current_price - lowest_10) / (highest_10 - lowest_10) if highest_10 != lowest_10 else 0.5
-    
-    ai_decision_prompt = f"""
-    URGENT: You are a self-correcting HFT AI. Follow this EXACT process:
+      <div class="flex items-center gap-2 mb-4">
+        <input type="checkbox" id="remember-me" class="w-4 h-4 rounded border-white/10 bg-black/40 accent-violet-600 focus:ring-violet-500">
+        <label for="remember-me" class="text-xs opacity-70 cursor-pointer select-none">Remember me (Save to LocalStorage)</label>
+      </div>
 
-    --- RAW DATA ---
-    Current: {current_price:.4f}
-    Range: {lowest_10:.4f} - {highest_10:.4f} 
-    Position: {price_position:.1%}
-    MAs: MA5={ma_5:.4f}, MA10={ma_10:.4f}, MA20={ma_20:.4f}
-    Full 20 periods: {closes[-20:]}
+      <button onclick="saveApiKey()" class="w-full py-3 btn-primary rounded-xl font-bold bg-violet-600 hover:bg-violet-700">
+        Connect
+      </button>
+    </div>
+  </div>
 
-    --- PHASE 1: INSTINCT ANALYSIS ---
-    [Analyze freely - what's the OBVIOUS trade here?]
-    Initial Signal: 
-    Primary Reason: 
-    Risk: 
+  <!-- AI Response Modal -->
+  <div id="ai-response-modal" class="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center hidden" onclick="closeAiModal(event)">
+    <div class="glass p-6 rounded-2xl max-w-md w-full mx-4 shadow-2xl border border-violet-500/30 relative" onclick="event.stopPropagation()">
+      <button onclick="closeAiModal()" class="absolute top-4 right-4 text-white/50 hover:text-white">
+        <i class="fas fa-times"></i>
+      </button>
+      <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+        <i class="fas fa-brain text-violet-400"></i> AI Analysis
+      </h2>
+      <div id="ai-response-content" class="space-y-4">
+        <!-- Content injected via JS -->
+        <div class="animate-pulse flex space-x-4">
+            <div class="flex-1 space-y-4 py-1">
+                <div class="h-4 bg-white/10 rounded w-3/4"></div>
+                <div class="space-y-2">
+                    <div class="h-4 bg-white/10 rounded"></div>
+                    <div class="h-4 bg-white/10 rounded w-5/6"></div>
+                </div>
+            </div>
+        </div>
+      </div>
+      <div class="mt-6 flex gap-3">
+        <button onclick="closeAiModal()" class="flex-1 py-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors">Close</button>
+        <button onclick="executeTradeFromModal()" id="btn-modal-trade" class="flex-1 py-2 rounded-lg btn-primary font-bold bg-violet-600 hover:bg-violet-700 hidden">
+            Execute Trade
+        </button>
+      </div>
+    </div>
+  </div>
 
-    --- PHASE 2: REALITY CHECK ---
-    Backtest your instinct against recent data (periods 0-14 → 15-19):
+  <!-- Toast Notification -->
+  <div id="toast" class="fixed bottom-5 right-5 z-50 bg-green-600 text-white py-2 px-4 rounded-lg shadow-lg hidden">
+    <p id="toast-message"></p>
+  </div>
 
-    Similar Patterns Found: 
-    Success Rate of Initial Signal: %
-    Most Common Failure Mode: 
-    Better Alternative Signal: 
+  <div class="container mx-auto px-3 py-4 max-w-5xl">
+    <!-- Status Dashboard -->
+    <div id="status-dashboard" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4 text-center">
+      <div id="status-current-price" class="glass rounded-lg p-3 md:p-4"></div>
+      <div id="status-available-margin" class="glass rounded-lg p-3 md:p-4"></div>
+      <div id="status-open-position" class="glass rounded-lg p-3 md:p-4"></div>
+      <div id="status-open-orders" class="glass rounded-lg p-3 md:p-4"></div>
+    </div>
 
-    --- PHASE 3: ADAPTIVE DECISION ---
-    [Choose based on empirical evidence, not hope]
+    <div class="grid lg:grid-cols-2 gap-4">
+      <!-- Manual Trade Panel -->
+      <div class="lg:col-span-2">
+        <div class="glass rounded-2xl p-4 md:p-6 glow">
+          <div class="flex items-center justify-between mb-4 gap-4">
+            <h2 class="text-xl md:text-2xl font-bold flex items-center gap-2">
+              <i class="fas fa-chart-line text-green-400"></i> Microhyper
+            </h2>
+            <div class="flex gap-2 text-xs md:text-sm">
+              <button id="btn-close-position" class="px-3 py-1.5 rounded-lg bg-red-600/80 hover:bg-red-700 flex items-center gap-1" onclick="closePosition()">
+                <i class="fas fa-door-open"></i><span>Close Position</span>
+              </button>
+              <button id="btn-cancel-orders" class="px-3 py-1.5 rounded-lg bg-amber-500/80 hover:bg-amber-600 flex items-center gap-1" onclick="cancelOpenOrders()">
+                <i class="fas fa-ban"></i><span>Cancel Orders</span>
+              </button>
+            </div>
+          </div>
 
-    FINAL RULES:
-    - If backtest < 40% → FLIP signal
-    - If 40-60% → REDUCE size, tighten stops  
-    - If > 60% → INCREASE confidence
+          <div class="grid grid-cols-12 gap-2 mb-4 items-end">
+            <!-- Pair -->
+            <div class="col-span-12">
+              <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">Pair</label>
+              <select id="pair" class="w-full px-2 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm">
+                <option>SOL/USD</option>
+                <option>BTC/USD</option>
+                <option>ETH/USD</option>
+                <option>HYPE/USD</option>
+                <option>ZEC/USD</option>
+                <option>PUMP/USD</option>
+                <option>BCH/USD</option>
+              </select>
+            </div>
 
-    OUTPUT (JSON):
-    {{
-    "signal": "LONG" or "SHORT",
-    "confidence": "HIGH" or "MEDIUM" or "LOW",
-    "rationale": "max 10 words with evidence",
-    "key_level": "exact_price", 
-    "backtest_quality": "STRONG" or "WEAK" or "MIXED",
-    "position_size": "FULL" or "HALF" or "SMALL",
-    "stop_distance": "TIGHT" or "NORMAL" or "WIDE"
-    }}
+            <!-- Leverage -->
+            <div class="col-span-3">
+              <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">Lev</label>
+              <input type="number" id="leverage" value="20" min="1" max="50" class="w-full px-2 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm text-center"/>
+            </div>
 
-    BE HONEST: If backtest is weak, say so and reduce position size.
-    """
+            <!-- Position Size USD -->
+            <div class="col-span-4">
+              <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">Size ($)</label>
+              <input type="number" step="1" id="size_usd" value="50" min="1" class="w-full px-2 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm"/>
+            </div>
 
-    try:
-        resp = completion(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are an expert cryptocurrency scalper. Analyze price action and make decisive trading decisions."},
-                {"role": "user", "content": ai_decision_prompt}
-            ],
-            temperature=0.3,  # Balanced temperature for creativity + consistency
-            max_tokens=250,
-            response_format={"type": "json_object"}
-        )
-        print(f"AI Message: {ai_decision_prompt}")
-        print(f"AI Raw Response: {resp}")
-        response_text = resp["choices"][0]["message"]["content"]
-        signal_data = json.loads(response_text)
+            <!-- Take Profit Price -->
+            <div class="col-span-5">
+              <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">TP <span class="font-normal normal-case opacity-50">(Opt)</span></label>
+              <div class="flex gap-1">
+                <input type="number" step="0.01" id="tp_price" placeholder="Price" class="w-full px-3 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm"/>
+                <button id="btn-update-tp" onclick="updateTP()" class="px-2 rounded-lg bg-blue-600/80 hover:bg-blue-700 text-xs flex items-center justify-center" title="Update TP">
+                  <i class="fas fa-sync-alt"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Mini Price Chart -->
+          <div class="mb-4">
+            <div class="flex items-center justify-between mb-1 text-xs opacity-75">
+              <div class="flex items-center gap-2">
+                <span class="flex items-center gap-1"><i class="fas fa-chart-bar text-violet-400"></i> Price Action</span>
+                <div class="flex bg-white/10 rounded-lg p-0.5">
+                  <button onclick="setChartInterval('1m')" id="btn-1m" class="px-2 py-0.5 rounded text-[10px] hover:bg-white/10 transition-colors">1m</button>
+                  <button onclick="setChartInterval('3m')" id="btn-3m" class="px-2 py-0.5 rounded text-[10px] bg-violet-500/50 text-white font-bold">3m</button>
+                </div>
+              </div>
+              <span id="mini-chart-label" class="text-[10px] uppercase tracking-wide"></span>
+            </div>
+            <div class="glass rounded-xl p-2 relative">
+              <!-- Chart Overlay Chips -->
+              <div id="chart-overlay" class="absolute top-2 left-2 flex flex-col gap-1 pointer-events-none hidden z-10">
+                <div class="bg-black/60 backdrop-blur-md px-1.5 py-0.5 rounded text-[9px] border border-white/10 flex items-center justify-between gap-2 shadow-lg min-w-[60px]">
+                   <span class="opacity-60 uppercase tracking-wider text-[8px] font-semibold">Liq</span>
+                   <span id="overlay-liq" class="font-mono font-bold text-orange-400">--</span>
+                </div>
+                <div class="bg-black/60 backdrop-blur-md px-1.5 py-0.5 rounded text-[9px] border border-white/10 flex items-center justify-between gap-2 shadow-lg min-w-[60px]">
+                   <span class="opacity-60 uppercase tracking-wider text-[8px] font-semibold">PnL</span>
+                   <span id="overlay-pnl" class="font-mono font-bold">--</span>
+                </div>
+              </div>
+              <canvas id="mini-chart" class="w-full" height="180"></canvas>
+            </div>
+          </div>
+
+          <div class="flex gap-3">
+            <button id="btn-long" onclick="executeTrade('LONG')" class="flex-1 py-3 btn-primary rounded-xl font-semibold text-base bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 flex items-center justify-center gap-2">
+              <i class="fas fa-arrow-up"></i><span>Long</span>
+            </button>
+            <div class="flex flex-col gap-1 flex-1">
+                <button id="btn-ai" onclick="executeAITrade()" class="w-full py-1.5 btn-primary rounded-t-xl font-semibold text-sm bg-gradient-to-r from-violet-600 to-purple-700 hover:from-violet-700 hover:to-purple-800 flex items-center justify-center gap-2">
+                  <i class="fas fa-robot"></i><span>Trade AI</span>
+                </button>
+                <button id="btn-ask-ai" onclick="askAi()" class="w-full py-1.5 btn-primary rounded-b-xl font-semibold text-sm bg-white/10 hover:bg-white/20 border border-white/5 flex items-center justify-center gap-2">
+                  <i class="fas fa-comment-dots text-violet-300"></i><span>Ask AI</span>
+                </button>
+            </div>
+            <button id="btn-short" onclick="executeTrade('SHORT')" class="flex-1 py-3 btn-primary rounded-xl font-semibold text-base bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-700 hover:to-rose-800 flex items-center justify-center gap-2">
+              <i class="fas fa-arrow-down"></i><span>Short</span>
+            </button>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- Trade History Section -->
+    <div class="mt-6">
+      <!-- Tabs Navigation -->
+      <div class="flex items-center gap-6 mb-4 border-b border-white/10">
+        <button onclick="switchTab('trades')" id="tab-btn-trades" class="pb-2 border-b-2 border-violet-500 text-white font-bold flex items-center gap-2 transition-all">
+            <i class="fas fa-history text-violet-400"></i> Trade History
+        </button>
+        <button onclick="switchTab('ai-logs')" id="tab-btn-ai-logs" class="pb-2 border-b-2 border-transparent text-white/50 hover:text-white font-bold flex items-center gap-2 transition-all">
+            <i class="fas fa-brain text-violet-400"></i> AI Logs
+        </button>
+      </div>
+
+      <!-- Tab Content: Trades -->
+      <div id="tab-content-trades">
+        <div class="flex flex-col gap-4 mb-4">
+          <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div class="flex items-center gap-4">
+              <!-- Range Slider -->
+              <div class="flex items-center gap-2 bg-white/5 px-3 py-1.5 rounded-full border border-white/10 hover:bg-white/10 transition-colors group">
+                  <i class="fas fa-clock text-[10px] opacity-50 group-hover:text-violet-400 transition-colors"></i>
+                  <input type="range" id="history-range-slider" min="2" max="168" step="2" value="24" 
+                         class="w-24 md:w-32 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-violet-500 hover:accent-violet-400 transition-all"
+                         oninput="updateHistoryRange(this.value)">
+                  <span id="history-range-label" class="text-[10px] font-mono font-bold w-8 text-right text-violet-300">24h</span>
+              </div>
+            </div>
+
+            <div id="history-stats" class="flex flex-wrap gap-2 text-xs md:justify-end">
+               <!-- Stats injected via JS -->
+               <div class="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 animate-pulse w-32 h-8"></div>
+            </div>
+          </div>
+        </div>
         
-        # Validate response
-        if signal_data.get("signal") not in ["LONG", "SHORT"]:
-            signal_data["signal"] = "LONG"  # Default fallback
-        
-        print(f"\n🎯 AI TRADING DECISION")
-        print(f"Direction: {signal_data.get('signal')}")
-        print(f"Confidence: {signal_data.get('confidence')}")
-        print(f"Reason: {signal_data.get('rationale_short')}")
-        print(f"Key Level: {signal_data.get('key_level', 'N/A')}")
-        print(f"Timeframe: {signal_data.get('timeframe_bias', 'N/A')}")
-        
-        return signal_data
-        
-    except Exception as e:
-        print(f"AI Decision Error: {e}")
-        return {
-            "signal": "NO TRADE", 
-            "confidence": "LOW",
-            "rationale_short": "Fallback: System error",
-            "key_level": "N/A",
-            "timeframe_bias": "N/A"
-        }
-
-def ask_ai_trading_signal_version2(market_data, model=LLM_MODEL):
-    """AI-driven decision making with trend-following focus"""
-    
-    klines_1m = market_data.get("klines_1m", {}).get("ohlcv", [])
-    if len(klines_1m) < 30:
-        return {"signal": "INSUFFICIENT_DATA", "confidence": "LOW", "rationale_short": "Need 30+ periods"}
-    
-    # Extract all available data
-    recent_data = klines_1m[-50:]
-    closes = [c["close"] for c in recent_data]
-    highs = [c["high"] for c in recent_data]
-    lows = [c["low"] for c in recent_data]
-    volumes = [c["volume"] for c in recent_data]
-    current_price = market_data.get("current_price", closes[-1])
-    
-    # Technical indicators
-    ma_5 = sum(closes[-5:]) / 5
-    ma_10 = sum(closes[-10:]) / 10
-    ma_20 = sum(closes[-20:]) / 20
-    
-    # Price levels
-    highest_10 = max(highs[-10:])
-    lowest_10 = min(lows[-10:])
-    price_position = (current_price - lowest_10) / (highest_10 - lowest_10) if highest_10 != lowest_10 else 0.5
-    
-    # Volume analysis
-    avg_volume = sum(volumes[-20:]) / 20
-    current_volume = volumes[-1] if volumes else 0
-    volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-    
-    # Calculate TREND STRENGTH (most important)
-    trend_strength = 0
-    if ma_5 > ma_10 > ma_20 and current_price > ma_5:
-        trend_strength = 3  # Strong uptrend
-    elif ma_5 < ma_10 < ma_20 and current_price < ma_5:
-        trend_strength = -3  # Strong downtrend
-    elif ma_5 > ma_10 and current_price > ma_5:
-        trend_strength = 2  # Moderate uptrend
-    elif ma_5 < ma_10 and current_price < ma_5:
-        trend_strength = -2  # Moderate downtrend
-    
-    # Momentum
-    momentum_5 = ((closes[-1] - closes[-5]) / closes[-5]) * 100
-    momentum_10 = ((closes[-1] - closes[-10]) / closes[-10]) * 100
-    
-    ai_decision_prompt = f"""
-CRITICAL: You are a TREND-FOLLOWING HFT trader. The trend is your friend. NEVER fight strong trends.
-
-📊 MARKET DATA:
-• Price: ${current_price:.4f} 
-• Range: ${lowest_10:.4f} - ${highest_10:.4f} (Position: {price_position:.1%})
-• MAs: MA5=${ma_5:.4f} | MA10=${ma_10:.4f} | MA20=${ma_20:.4f}
-• Trend Strength: {'STRONG UPTREND' if trend_strength == 3 else 'MODERATE UPTREND' if trend_strength == 2 else 'STRONG DOWNTREND' if trend_strength == -3 else 'MODERATE DOWNTREND' if trend_strength == -2 else 'NO CLEAR TREND'}
-• Momentum: {momentum_5:+.2f}% (5-period) | {momentum_10:+.2f}% (10-period)
-• Volume: {volume_ratio:.1f}x average
-
-🎯 PRIMARY RULE: TREND DIRECTION OVERRIDES EVERYTHING
-
-TREND-FOLLOWING DECISION FRAMEWORK:
-
-1. **IDENTIFY TREND** (60% weight):
-   - Strong Uptrend (MA5>MA10>MA20, price above all): ALWAYS bias LONG
-   - Strong Downtrend (MA5<MA10<MA20, price below all): ALWAYS bias SHORT  
-   - No clear trend: Use momentum and levels
-
-2. **CONFIRM WITH MOMENTUM** (25% weight):
-   - Positive momentum in uptrend: CONFIRM LONG
-   - Negative momentum in downtrend: CONFIRM SHORT
-   - Momentum against trend: WAIT or REDUCE size
-
-3. **ENTRY TIMING** (15% weight):
-   - In uptrend: Buy pullbacks to support (MA10/MA20)
-   - In downtrend: Sell rallies to resistance (MA10/MA20)
-
-🚨 CRITICAL WARNINGS:
-❌ NEVER short a strong uptrend just because it's "overbought"
-❌ NEVER long a strong downtrend just because it's "oversold"  
-✅ Strong trends can stay overbought/oversold for long periods
-✅ "The trend is your friend until it ends"
-
-📈 CURRENT ANALYSIS:
-- Trend: {'BULLISH' if trend_strength > 0 else 'BEARISH' if trend_strength < 0 else 'SIDEWAYS'}
-- Price vs MAs: {'ABOVE ALL' if current_price > ma_5 > ma_10 > ma_20 else 'BELOW ALL' if current_price < ma_5 < ma_10 < ma_20 else 'MIXED'}
-- Momentum: {'ACCELERATING' if momentum_5 > 0 and momentum_5 > momentum_10 else 'DECELERATING' if momentum_5 < 0 and momentum_5 < momentum_10 else 'STABLE'}
-
-💡 STRATEGY SELECTION:
-
-CASE 1: STRONG UPTREND (like now)
-→ Strategy: BUY DIPS | Stop: Below MA10 | Target: New highs
-→ NEVER short against this trend
-
-CASE 2: STRONG DOWNTREND  
-→ Strategy: SELL RALLIES | Stop: Above MA10 | Target: New lows
-→ NEVER long against this trend
-
-CASE 3: NO TREND
-→ Strategy: Range trading | Buy support, sell resistance
-→ Use smaller position sizes
-
-🎯 FINAL DECISION LOGIC:
-1. What is the PRIMARY trend? {trend_strength}
-2. Is momentum CONFIRMING the trend? {'YES' if (trend_strength > 0 and momentum_5 > 0) or (trend_strength < 0 and momentum_5 < 0) else 'NO'}
-3. Should we FOLLOW or FIGHT the trend? {'FOLLOW' if abs(trend_strength) >= 2 else 'WAIT'}
-
-OUTPUT (JSON):
-{{
-  "signal": "LONG" or "SHORT",
-  "confidence": "VERY_HIGH" or "HIGH" or "MEDIUM" or "LOW",
-  "rationale_short": "max 10 words focusing on trend",
-  "key_level": "critical_level_for_stop",
-  "timeframe_bias": "1min" or "3min" or "5min", 
-  "position_size": "FULL" or "HALF" or "SMALL",
-  "trend_strength": "STRONG_BULL" or "STRONG_BEAR" or "MILD_BULL" or "MILD_BEAR" or "SIDEWAYS",
-  "strategy": "TREND_FOLLOWING" or "MEAN_REVERSION" or "BREAKOUT"
-}}
-
-BE HONEST: If trend is strong, you MUST follow it regardless of "overbought" conditions.
-"""
-
-    try:
-        resp = completion(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a trend-following HFT trader. You never fight strong trends. Your primary rule: 'The trend is your friend'."},
-                {"role": "user", "content": ai_decision_prompt}
-            ],
-            temperature=0.1,  # Very low temperature for consistent trend-following
-            max_tokens=300,
-            response_format={"type": "json_object"}
-        )
-        
-        print(f"🤖 TREND-FOLLOWING ANALYSIS")
-        print(f"📈 Trend Strength: {trend_strength} ({'BULLISH' if trend_strength > 0 else 'BEARISH' if trend_strength < 0 else 'SIDEWAYS'})")
-        print(f"💰 Price: ${current_price:.4f} | Position: {price_position:.1%}")
-        
-        response_text = resp["choices"][0]["message"]["content"]
-        signal_data = json.loads(response_text)
-        
-        # Validate and enhance response
-        if signal_data.get("signal") not in ["LONG", "SHORT"]:
-            # Fallback to trend direction
-            signal_data["signal"] = "LONG" if trend_strength > 0 else "SHORT" if trend_strength < 0 else "LONG"
-        
-        # Add contextual data
-        signal_data["timestamp"] = datetime.now(timezone.utc).isoformat()
-        signal_data["current_price"] = current_price
-        signal_data["calculated_trend_strength"] = trend_strength
-        signal_data["price_vs_mas"] = "above_all" if current_price > ma_5 > ma_10 > ma_20 else "below_all" if current_price < ma_5 < ma_10 < ma_20 else "mixed"
-        
-        print(f"\n🎯 TRADING DECISION")
-        print(f"📍 Signal: {signal_data.get('signal')}")
-        print(f"🎭 Confidence: {signal_data.get('confidence')}")
-        print(f"📝 Reason: {signal_data.get('rationale_short')}")
-        print(f"📊 Trend: {signal_data.get('trend_strength')}")
-        print(f"🎯 Strategy: {signal_data.get('strategy')}")
-        
-        return signal_data
-        
-    except Exception as e:
-        print(f"❌ AI Decision Error: {e}")
-        # Simple trend-following fallback
-        if trend_strength > 1:
-            fallback_signal = "LONG"
-            fallback_confidence = "HIGH"
-        elif trend_strength < -1:
-            fallback_signal = "SHORT" 
-            fallback_confidence = "HIGH"
-        else:
-            fallback_signal = "LONG" if momentum_5 > 0 else "SHORT"
-            fallback_confidence = "MEDIUM"
-        
-        return {
-            "signal": fallback_signal,
-            "confidence": fallback_confidence,
-            "rationale_short": f"Fallback: Trend following {fallback_signal}",
-            "key_level": f"{ma_10:.4f}",
-            "timeframe_bias": "3min",
-            "position_size": "HALF",
-            "trend_strength": "STRONG_BULL" if trend_strength > 1 else "STRONG_BEAR" if trend_strength < -1 else "MILD_BULL" if momentum_5 > 0 else "MILD_BEAR",
-            "strategy": "TREND_FOLLOWING",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "current_price": current_price,
-            "is_fallback": True
-        }
-
-def ask_ai_trading_signal_version1(market_data, model=LLM_MODEL):
-    """AI-driven decision making with comprehensive data analysis"""
-    
-    klines_1m = market_data.get("klines_1m", {}).get("ohlcv", [])
-    if len(klines_1m) < 30:
-        return {"signal": "INSUFFICIENT_DATA", "confidence": "LOW", "rationale_short": "Need 30+ periods"}
-    
-    # Extract all available data
-    recent_data = klines_1m[-50:]
-    closes = [c["close"] for c in recent_data]
-    highs = [c["high"] for c in recent_data]
-    lows = [c["low"] for c in recent_data]
-    volumes = [c["volume"] for c in recent_data]
-    current_price = market_data.get("current_price", closes[-1])
-    
-    # Technical indicators
-    ma_5 = sum(closes[-5:]) / 5
-    ma_10 = sum(closes[-10:]) / 10
-    ma_20 = sum(closes[-20:]) / 20
-    
-    # Price levels
-    highest_10 = max(highs[-10:])
-    lowest_10 = min(lows[-10:])
-    price_position = (current_price - lowest_10) / (highest_10 - lowest_10) if highest_10 != lowest_10 else 0.5
-    
-    # Volume analysis
-    avg_volume = sum(volumes[-20:]) / 20
-    current_volume = volumes[-1] if volumes else 0
-    volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-    
-    # Order book data
-    order_book = market_data.get("order_book", {})
-    bids = order_book.get("bids", [])
-    asks = order_book.get("asks", [])
-    
-    # Calculate market depth
-    bid_depth = sum([qty for _, qty in bids[:5]]) if bids else 0
-    ask_depth = sum([qty for _, qty in asks[:5]]) if asks else 0
-    depth_ratio = bid_depth / ask_depth if ask_depth > 0 else 1
-    
-    # Recent trades analysis
-    recent_trades = market_data.get("recent_trades", [])
-    buy_volume = sum([t["qty"] for t in recent_trades[-20:] if not t.get("isBuyerMaker", False)])
-    sell_volume = sum([t["qty"] for t in recent_trades[-20:] if t.get("isBuyerMaker", False)])
-    volume_imbalance = (buy_volume - sell_volume) / (buy_volume + sell_volume) if (buy_volume + sell_volume) > 0 else 0
-    
-    # Momentum indicators
-    price_change_5m = ((closes[-1] - closes[-5]) / closes[-5]) * 100 if len(closes) >= 5 else 0
-    price_change_10m = ((closes[-1] - closes[-10]) / closes[-10]) * 100 if len(closes) >= 10 else 0
-    
-    # Volatility calculation
-    price_std = np.std(closes[-20:]) if len(closes) >= 20 else 0
-    volatility_ratio = (price_std / current_price) * 100 if current_price > 0 else 0
-    
-    # Recent price action context
-    recent_trend = "BULLISH" if closes[-1] > closes[-5] > closes[-10] else "BEARISH" if closes[-1] < closes[-5] < closes[-10] else "SIDEWAYS"
-    
-    # Support/Resistance levels
-    resistance_level = highest_10
-    support_level = lowest_10
-    
-    ai_decision_prompt = f"""
-URGENT  HFT DECISION - ANALYZE ALL FACTORS:
-
-🎯 PRICE & TECHNICALS:
-• Current: ${current_price:.4f} | Range: ${lowest_10:.4f} - ${highest_10:.4f}
-• Position in Range: {price_position:.1%} ({'OVERSOLD' if price_position < 0.3 else 'OVERBOUGHT' if price_position > 0.7 else 'NEUTRAL'})
-• MAs: MA5=${ma_5:.4f} | MA10=${ma_10:.4f} | MA20=${ma_20:.4f}
-• Trend: {'BULLISH' if ma_5 > ma_10 > ma_20 else 'BEARISH' if ma_5 < ma_10 < ma_20 else 'MIXED'}
-• Momentum: {price_change_5m:+.2f}% (5m) | {price_change_10m:+.2f}% (10m)
-• Recent Trend: {recent_trend}
-• Volatility: {volatility_ratio:.2f}% ({'HIGH' if volatility_ratio > 1.0 else 'LOW' if volatility_ratio < 0.3 else 'MEDIUM'})
-
-📊 MARKET MICROSTRUCTURE:
-• Order Book: Bid/Ask Depth Ratio: {depth_ratio:.2f} ({'BULLISH' if depth_ratio > 1.2 else 'BEARISH' if depth_ratio < 0.8 else 'BALANCED'})
-• Volume: Current {volume_ratio:.1f}x average ({'HIGH' if volume_ratio > 1.5 else 'LOW' if volume_ratio < 0.7 else 'NORMAL'})
-• Trade Flow: Buy/Sell Imbalance: {volume_imbalance:+.2f} ({'BUYING' if volume_imbalance > 0.1 else 'SELLING' if volume_imbalance < -0.1 else 'BALANCED'})
-
-🔍 RECENT PRICE ACTION (Last 10 periods):
-{[round(c, 3) for c in closes[-10:]]}
-
-🎲 DECISION MATRIX - WEIGHTED SCORING (1 to 5):
-
-TREND FACTORS (30%):
-[ ] Price above all MAs: +2
-[ ] Bullish MA alignment: +2  
-[ ] Uptrend momentum: +1
-[ ] Recent bullish trend: +1
-
-MEAN REVERSION (25%):
-[ ] Overbought (>70% range): -2
-[ ] Oversold (<30% range): +2
-[ ] At range extreme: ±0
-
-MARKET DEPTH (25%):
-[ ] Strong bid support (depth > 1.2): +2
-[ ] Strong ask resistance (depth < 0.8): -2
-[ ] Balanced order book: 0
-
-MOMENTUM & FLOW (20%):
-[ ] High buy volume (imbalance > 0.1): +1
-[ ] Positive momentum (5m > 0): +1
-[ ] Volume confirmation (ratio > 1.2): +1
-
-CALCULATION:
-Total Score = (Trend × 0.3) + (MeanReversion × 0.25) + (Depth × 0.25) + (Momentum × 0.2)
-
-📈 SIGNAL THRESHOLDS:
-• STRONG LONG: Score > 3.5 → HIGH confidence
-• LONG: Score > 2.0 → MEDIUM confidence  
-• NEUTRAL: 1.5 - 2.0 → LOW confidence or NO TRADE
-• SHORT: Score < 1.5 → MEDIUM confidence
-• STRONG SHORT: Score < 0.5 → HIGH confidence
-
-🚨 RISK FILTERS (MUST CHECK):
-[ ] If at range extreme AND low volume → REDUCE confidence by one level
-[ ] If conflicting signals (e.g., bullish trend but bearish depth) → MAX MEDIUM confidence
-[ ] If high volatility (>1.5%) → Use tighter stops
-[ ] If low volume (<0.7x average) → Consider NO TRADE
-
-💡 KEY LEVELS TO WATCH:
-• Immediate Resistance: ${resistance_level:.4f}
-• Immediate Support: ${support_level:.4f}
-• Breakout Level: {'LONG above ' + str(round(resistance_level, 3)) if price_position > 0.6 else 'SHORT below ' + str(round(support_level, 3))}
-
-🎯 FINAL DECISION:
-Based on comprehensive analysis of price action, order flow, and market structure:
-
-OUTPUT REQUIREMENTS:
-- MUST output valid JSON
-- MUST choose LONG/SHORT - no neutral in final decision
-- Include specific score breakdown
-- Be honest about weak signals
-
-OUTPUT (JSON):
-{{
-  "signal": "LONG" or "SHORT",
-  "confidence": "VERY_HIGH" or "HIGH" or "MEDIUM" or "LOW",
-  "rationale_short": "max 12 words with key reason",
-  "key_level": "nearest_critical_price",
-  "timeframe_bias": "1min" or "3min" or "5min",
-  "position_size": "FULL" or "HALF" or "SMALL",
-  "score_breakdown": "brief_score_explanation",
-  "stop_suggestion": "tight" or "normal" or "wide"
-}}
-
-CALCULATE YOUR SCORE NOW AND BE HONEST ABOUT WEAK SIGNALS.
-"""
-
-    try:
-        resp = completion(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are an expert cryptocurrency HFT trader. Analyze all market factors and make decisive trading decisions with proper risk management."},
-                {"role": "user", "content": ai_decision_prompt}
-            ],
-            temperature=0.2,  # Lower temperature for more consistent, data-driven responses
-            max_tokens=350,
-            response_format={"type": "json_object"}
-        )
-        
-        print(f"🤖 AI Analysis Requested")
-        print(f"📊 Market Context: ${current_price:.4f} | Range Position: {price_position:.1%}")
-        print(f"📈 Trend: {recent_trend} | Depth Ratio: {depth_ratio:.2f}")
-        
-        response_text = resp["choices"][0]["message"]["content"]
-        signal_data = json.loads(response_text)
-        
-        # Validate response structure
-        required_fields = ["signal", "confidence", "rationale_short", "key_level"]
-        for field in required_fields:
-            if field not in signal_data:
-                signal_data[field] = "N/A"
-        
-        # Ensure signal is valid
-        if signal_data.get("signal") not in ["LONG", "SHORT"]:
-            signal_data["signal"] = "LONG"  # Default fallback
-        
-        # Add timestamp and additional context
-        signal_data["timestamp"] = datetime.now(timezone.utc).isoformat()
-        signal_data["current_price"] = current_price
-        signal_data["calculated_range_position"] = f"{price_position:.1%}"
-        
-        print(f"\n🎯 AI TRADING DECISION")
-        print(f"📍 Direction: {signal_data.get('signal')}")
-        print(f"🎭 Confidence: {signal_data.get('confidence')}")
-        print(f"📝 Reason: {signal_data.get('rationale_short')}")
-        print(f"🎯 Key Level: {signal_data.get('key_level')}")
-        print(f"⏱️ Timeframe: {signal_data.get('timeframe_bias', 'N/A')}")
-        print(f"💰 Position Size: {signal_data.get('position_size', 'N/A')}")
-        print(f"📊 Score: {signal_data.get('score_breakdown', 'N/A')}")
-        
-        return signal_data
-        
-    except Exception as e:
-        print(f"❌ AI Decision Error: {e}")
-        # Fallback decision based on simple MA crossover
-        fallback_signal = "LONG" if ma_5 > ma_10 else "SHORT"
-        fallback_confidence = "MEDIUM" if abs(ma_5 - ma_10) > (current_price * 0.001) else "LOW"
-        
-        return {
-            "signal": fallback_signal,
-            "confidence": fallback_confidence,
-            "rationale_short": f"Fallback: MA crossover {fallback_signal}",
-            "key_level": f"{highest_10:.4f}" if fallback_signal == "LONG" else f"{lowest_10:.4f}",
-            "timeframe_bias": "5min",
-            "position_size": "HALF",
-            "score_breakdown": "Fallback_MA_Crossover",
-            "stop_suggestion": "normal",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "current_price": current_price,
-            "is_fallback": True
-        }
-
-# -------- Hyperliquid Helpers --------
-def get_open_position(info_client, user, symbol: str):
-    """Check for an open position for the specified symbol"""
-    try:
-        user_state = info_client.user_state(user)
-        for position in user_state.get("assetPositions", []):
-            if position.get("position", {}).get("coin") == symbol and float(position.get("position", {}).get("szi", 0)) != 0:
-                return position["position"]
-    except Exception as e:
-        print(f"Failed to get open position for {symbol}: {e}")
-    return None
-
-def place_trade(exchange_client, info_client, signal, follow_signal: bool = True, notional_usd: Optional[float] = None):
-    """Place a trade on Hyperliquid based on the signal.
-    
-    Args:
-        exchange_client: Hyperliquid Exchange client
-        info_client: Hyperliquid Info client
-        signal: dict signal with fields like 'signal', 'targets', 'stop_loss', etc.
-        follow_signal: If True (default), place the trade in the same direction as signal.
-                       If False, place the opposite side and use stop_loss as take profit.
-        notional_usd: The exact notional value in USD for the trade. If provided, it overrides calculations based on position_size %.
-    """
-    if not HYPER_WALLET_ADDRESS or not HYPER_WALLET_KEY:
-        print("Hyperliquid wallet address or key not set. Skipping trade.")
-        return {"status": "no_credentials"}
-
-    if signal.get("signal") not in ["LONG", "SHORT"]:
-        return {"status": "invalid_signal"}
-
-    symbol = signal.get("pair", "SOL/USD").split('/')[0].upper()
-
-    try:
-        # Fetch user state for margin and account value
-        user_state = info_client.user_state(HYPER_WALLET_ADDRESS)
-        account_value = float(user_state['marginSummary']['accountValue'])
-        if account_value <= 0:
-            raise Exception("Account value is zero - cannot calculate position size")
-        
-        lev = int(signal.get("leverage", "20").replace("x", ""))
-        current_price = float(signal.get("current_price", 0) or 0)
-        if current_price <= 0:
-            raise Exception("Missing current_price in signal")
-
-        # --- Size Calculation Logic ---
-        if notional_usd:
-            # Use the provided notional USD value directly
-            trade_notional_usd = notional_usd
-            print(f"Using provided notional USD: ${trade_notional_usd}")
-        else:
-            # Fallback to percentage-based calculation
-            pos_pct_str = signal.get("position_size", "0%")
-            pos_pct = float(pos_pct_str[:-1]) / 100
-            trade_notional_usd = account_value * pos_pct * lev
-            print(f"Calculating notional from account value: {account_value} * {pos_pct} * {lev} = ${trade_notional_usd}")
-
-        min_notional = 14  # Minimum notional value in USD
-        final_notional = max(trade_notional_usd, min_notional)
-        size = max(round(final_notional / current_price, 2), 0.01)
-        
-        print(f"Calculated size: {size} {symbol}, Notional: {final_notional:.2f} USD")
-        if size <= 0:
-            raise Exception("Calculated size is zero or negative")
-        
-        # Set leverage
-        exchange_client.update_leverage(lev, symbol, is_cross=False)
-        print(f"Set leverage to {lev}x for {symbol}")
-
-        # Check for open position
-        open_position = get_open_position(info_client, HYPER_WALLET_ADDRESS, symbol)
-        if open_position:
-            print(f"Existing position found for {symbol}. Skipping new trade.")
-            return {"status": "position_exists"}
-
-        # Decide side: follow signal or invert it
-        is_buy = signal["signal"] == "LONG" if follow_signal else signal["signal"] != "LONG"
-        
-        # Place market entry with retry
-        max_retries = 1
-        filled_size = 0
-        for attempt in range(max_retries + 1):
-            try:
-                print(f"Placing MARKET {'BUY' if is_buy else 'SELL'} order: size={size}, symbol={symbol}, attempt={attempt+1}")
-                order_result = exchange_client.market_open(symbol, is_buy, size, None, 0.10) # 10% slippage
-                filled = False
-                if order_result.get("status") == "ok":
-                    for status in order_result["response"].get("data", {}).get("statuses", []):
-                        if "filled" in status:
-                            filled_size = float(status['filled']['totalSz'])
-                            if filled_size > 0:
-                                filled = True
-                                print(f"✅ Entry filled: {'BUY' if is_buy else 'SELL'} {filled_size} {symbol} @ {status['filled']['avgPx']}")
-                                break
-                        elif "err" in status:
-                            raise Exception(f"Entry error: {status['err']}")
-                    if not filled:
-                        raise Exception("Market entry did not fill or partially filled with zero size")
-                
-                # Confirm position opened (poll with multiple attempts)
-                position_confirmed = False
-                for i in range(5):  # Try 5 times with 1 second delay
-                    time.sleep(1)
-                    open_position_after_trade = get_open_position(info_client, HYPER_WALLET_ADDRESS, symbol)
-                    if open_position_after_trade:
-                        position_confirmed = True
-                        actual_size = float(open_position_after_trade.get('szi', 0))
-                        print(f"✅ Position confirmed: {actual_size} {symbol}")
-                        break
-                    print(f"⏳ Waiting for position to appear... ({i+1}/5)")
-                
-                if not position_confirmed:
-                    raise Exception("Entry filled but no position detected after multiple checks")
-                
-                break  # Success
-            except Exception as e:
-                if attempt == max_retries:
-                    raise
-                print(f"Entry attempt failed: {e}. Retrying...")
-                time.sleep(5)
-
-        # Place Take Profit order with proper error handling
-        targets = signal.get("targets", [])
-        # Determine TP price depending on follow_signal
-        raw_tp_price = None
-        if follow_signal:
-            if not targets:
-                print("No targets in signal - skipping TP setup")
-                return {"status": "tp_skipped"}
-            try:
-                raw_tp_price = float(str(targets[0]).replace(",", ""))
-            except (ValueError, IndexError):
-                print("First target not numeric or targets list is empty - skipping TP setup")
-                return {"status": "tp_skipped"}
-        else:
-            # Prefer stop_loss as TP when inverting
-            sl_val = signal.get("stop_loss")
-            try:
-                if isinstance(sl_val, str):
-                    sl_val_clean = sl_val.strip().replace(",", "")
-                    raw_tp_price = float(sl_val_clean)
-                elif sl_val is not None:
-                    raw_tp_price = float(sl_val)
-            except Exception:
-                raw_tp_price = None
-            if raw_tp_price is None:
-                # Fallback to first target if stop_loss unusable
-                try:
-                    raw_tp_price = float(str(targets[0]).replace(",", "")) if targets else None
-                except (ValueError, IndexError):
-                    raw_tp_price = None
-            if raw_tp_price is None:
-                print("No usable stop_loss or targets in signal - skipping TP setup")
-                return {"status": "tp_skipped"}
-            # raw_tp_price = round(raw_tp_price - 0.3, 2) # Removed hardcoded offset for small prices
-        
-        # Use only the first TP price
-        if filled_size > 0 and raw_tp_price is not None:
-            tp_price = round(raw_tp_price, 6)
-            tp_size = filled_size  # Use full position size for single TP
-            
-            print(f"Placing Take Profit limit order: size={tp_size}, price={tp_price}")
-            
-            try:
-                # Use limit order for take profit with reduceOnly
-                tp_order_result = exchange_client.order(
-                    symbol, 
-                    not is_buy,  # Opposite direction for TP
-                    tp_size, 
-                    tp_price, 
-                    {"limit": {"tif": "Gtc"}}, 
-                    reduce_only=True
-                )
-                
-                print(f"TP order result: {json.dumps(tp_order_result, indent=2)}")
-                
-                # Check if TP order was successful
-                if tp_order_result.get("status") == "ok":
-                    tp_success = False
-                    for status in tp_order_result["response"].get("data", {}).get("statuses", []):
-                        if "resting" in status:
-                            tp_success = True
-                            print(f"✅ Take Profit order placed successfully at {tp_price} for {tp_size} {symbol}")
-                            break
-                        elif "err" in status:
-                            error_msg = status['err']
-                            print(f"❌ Take Profit order error: {error_msg}")
-                            # Try alternative approach if first method fails
-                            _place_tp_alternative(exchange_client, symbol, not is_buy, tp_size, tp_price)
-                    if not tp_success:
-                        print("⚠️ Take Profit order response unclear, trying alternative method...")
-                        _place_tp_alternative(exchange_client, symbol, not is_buy, tp_size, tp_price)
-                else:
-                    print(f"❌ Take Profit order failed: {tp_order_result}")
-                    # Try alternative approach
-                    _place_tp_alternative(exchange_client, symbol, not is_buy, tp_size, tp_price)
-                    
-            except Exception as tp_error:
-                print(f"Failed to place Take Profit order: {tp_error}")
-                # Try alternative approach
-                _place_tp_alternative(exchange_client, symbol, not is_buy, tp_size, tp_price)
-
-        return {"status": "filled", "size": filled_size}
-    except Exception as e:
-        print(f"Trade error: {e}")
-        return {"status": "error", "detail": str(e)}
-
-def _place_tp_alternative(exchange_client, symbol, is_buy, size, price):
-    """Alternative method to place take profit order"""
-    try:
-        print(f"Trying alternative TP method: {symbol} {'BUY' if is_buy else 'SELL'} {size} @ {price}")
-        
-        # Method 1: Try without reduceOnly flag
-        result = exchange_client.order(
-            symbol, 
-            is_buy, 
-            size, 
-            price, 
-            {"limit": {"tif": "Gtc"}}
-        )
-        
-        if result.get("status") == "ok":
-            print("✅ Alternative TP method successful")
-            return True
-        else:
-            print(f"❌ Alternative TP method failed: {result}")
-            return False
-            
-    except Exception as e:
-        print(f"❌ Alternative TP method also failed: {e}")
-        return False
-
-def log_ai_trade(pair, direction, signal_data):
-    """Log AI trade decision to SQLite database"""
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        trade_id = str(uuid.uuid4())
-        timestamp = datetime.now(timezone.utc).isoformat()
-        signal_json = json.dumps(signal_data)
-        
-        c.execute('''
-            INSERT INTO ai_trade_logs (trade_id, timestamp, pair, direction, signal_output)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (trade_id, timestamp, pair, direction, signal_json))
-        
-        conn.commit()
-        conn.close()
-        print(f"📝 Logged AI trade {trade_id} for {pair}")
-        return trade_id
-    except Exception as e:
-        print(f"❌ Failed to log AI trade: {e}")
-        return None
-        
-# -------- Client Init --------
-def _init_hyperliquid_clients():
-    info_client = Info(constants.MAINNET_API_URL, skip_ws=True)
-    exchange_client = None
-    if HYPER_WALLET_ADDRESS and HYPER_WALLET_KEY:
-        account = Account.from_key(HYPER_WALLET_KEY)
-        exchange_client = Exchange(account, base_url=constants.MAINNET_API_URL)
-    return info_client, exchange_client
-
-# -------- Security --------
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-async def get_api_key(api_key: Optional[str] = Security(api_key_header)):
-    if not API_ACCESS_TOKEN:
-        print("❌ Request failed: API_ACCESS_TOKEN not configured on server")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="API_ACCESS_TOKEN not configured"
-        )
-    if api_key and api_key == API_ACCESS_TOKEN:
-        return api_key
-    
-    print(f"⚠️ Auth failed. Provided: {api_key[:4] if api_key else 'None'}...")
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Could not validate credentials"
-    )
-
-# -------- FastAPI Models --------
-class TradeRequest(BaseModel):
-    pair: str = Field(..., example="SOL/USD")
-    direction: str = Field(..., pattern="^(?i)(LONG|SHORT)$", example="LONG")
-    leverage: float = Field(..., gt=0, example=3)
-    trade_size_usd: Optional[float] = Field(None, gt=0, description="Position size in USD", example=100.0)
-    trade_size: Optional[float] = Field(None, gt=0, description="Position size as percent of portfolio", example=2.5)
-    profit_take: Optional[float] = Field(None, description="Target price (absolute)")
-    follow_signal: Optional[bool] = Field(True, description="Invert side if False")
-
-class AITradeRequest(BaseModel):
-    pair: str = Field(..., example="SOL/USD")
-    leverage: float = Field(..., gt=0, example=20)
-    trade_size_usd: Optional[float] = Field(None, gt=0, description="Position size in USD", example=50.0)
-
-class AskAIRequest(BaseModel):
-    pair: str = Field(..., example="SOL/USD")
-
-class UpdateTPRequest(BaseModel):
-    pair: str
-    price: float
-
-app = FastAPI(title="Hyperliquid Sentinel API", description="Synchronous trading & analysis API")
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://austinwin.github.io",
-        "http://192.168.1.167:8000",
-        "http://localhost:8000",
-        "https://lifebite.app",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-# Mount static files (frontend)
-static_dir = os.path.join(os.path.dirname(__file__), "static")
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
-@app.get("/")
-def serve_index():
-    return FileResponse(os.path.join(static_dir, "index.html"))
-
-@app.get("/ohlcv", dependencies=[Depends(get_api_key)])
-def get_ohlcv(symbol: str = Query("SOL"), interval: str = Query("1m"), limit: int = Query(60, gt=0, le=500)):
-    """Return recent OHLCV data from Hyperliquid for a given symbol and interval using Hyperliquid REST.
-
-    Output is an array of {time, open, high, low, close, volume} for the mini chart.
-    """
-    try:
-        # Hyperliquid REST info endpoint
-        base_url = constants.MAINNET_API_URL.rstrip("/")
-        url = f"{base_url}/info"
-        now_ms = int(time.time() * 1000)
-        # assume 60s per candle for 1m (close enough for small window)
-        ms_per_candle = 60_000
-        start_ms = now_ms - limit * ms_per_candle * 2
-        
-        payload = {
-            "type": "candleSnapshot",
-            "req": {
-                "coin": symbol,
-                "interval": interval,
-                "startTime": start_ms,
-                "endTime": now_ms
-            }
-        }
-        
-        r = session.post(url, json=payload, timeout=10)
-        r.raise_for_status()
-        raw = r.json()
-        
-        # raw is a list of dicts: [{'t': ..., 'o': ..., 'h': ..., 'l': ..., 'c': ..., 'v': ...}, ...]
-        candles = raw[-limit:]
-        out = []
-        for c in candles:
-            t_ms = c['t']
-            out.append({
-                "time": datetime.fromtimestamp(t_ms / 1000, tz=timezone.utc).isoformat(),
-                "open": float(c['o']),
-                "high": float(c['h']),
-                "low": float(c['l']),
-                "close": float(c['c']),
-                "volume": float(c['v']),
-            })
-        return out
-    except Exception as e:
-        print(f"Error fetching ohlcv for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch OHLCV: {e}")
-
-@app.get("/status", dependencies=[Depends(get_api_key)])
-def get_status(pair: str = Query("SOL/USD")):
-    try:
-        symbol = pair.split('/')[0].upper()
-        info_client, _ = _init_hyperliquid_clients()
-        
-        if not HYPER_WALLET_ADDRESS:
-            # Return a default state if no wallet is configured, instead of erroring
-            return {
-                "account_value": "0",
-                "available_margin": "0",
-                "current_price": "N/A",
-                "open_position": None,
-                "open_orders": []
-            }
-
-        user_state = info_client.user_state(HYPER_WALLET_ADDRESS)
-        # Fetch open orders explicitly as they are not included in user_state
-        raw_open_orders = info_client.open_orders(HYPER_WALLET_ADDRESS)
-        all_mids = info_client.all_mids()
-        
-        open_position = None
-        # Safely access nested dictionaries
-        for pos in user_state.get("assetPositions", []):
-            position_data = pos.get("position", {})
-            if position_data.get("coin") == symbol and float(position_data.get("szi", 0)) != 0:
-                open_position = position_data
-                break
-        
-        open_orders = [
-            order for order in raw_open_orders
-            if order.get("coin") == symbol
-        ]
-
-        margin_summary = user_state.get("marginSummary", {})
-        account_value = float(margin_summary.get("accountValue", "0"))
-        total_margin_used = float(margin_summary.get("totalMarginUsed", "0"))
-        available_margin = max(0, account_value - total_margin_used)
-
-        return {
-            "account_value": margin_summary.get("accountValue", "0"),
-            "available_margin": f"{available_margin:.2f}",
-            "current_price": all_mids.get(symbol, "N/A"),
-            "open_position": open_position,
-            "open_orders": open_orders
-        }
-    except Exception as e:
-        print(f"Error fetching status: {e}")
-        # Return a structured error response that the frontend can handle
-        raise HTTPException(status_code=500, detail=f"Failed to fetch Hyperliquid data: {e}")
-
-
-@app.get("/history", dependencies=[Depends(get_api_key)])
-def get_history(pair: str = Query("SOL/USD")):
-    symbol = pair.split('/')[0].upper()
-    info_client, _ = _init_hyperliquid_clients()
-    
-    if not HYPER_WALLET_ADDRESS:
-        return []
-
-    try:
-        user_fills = info_client.user_fills(HYPER_WALLET_ADDRESS)
-        # Filter by symbol and sort by time desc
-        symbol_fills = [f for f in user_fills if f.get("coin") == symbol]
-        symbol_fills.sort(key=lambda x: x['time'], reverse=True)
-        
-        history = []
-        for fill in symbol_fills:
-            ts = fill['time']
-            # dir is usually present in user_fills response from SDK (e.g. "Open Long", "Close Short")
-            direction = fill.get('dir') 
-            if not direction:
-                 side = fill['side'] # 'B' or 'A'
-                 direction = "Buy" if side == 'B' else "Sell"
-
-            history.append({
-                "time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
-                "side": direction,
-                "price": float(fill['px']),
-                "size": float(fill['sz']),
-                "value": float(fill['px']) * float(fill['sz']),
-                "fee": float(fill['fee']),
-                "pnl": float(fill.get('closedPnl', 0))
-            })
-            
-        return history
-    except Exception as e:
-        print(f"Error fetching history: {e}")
-        return []
-
-
-@app.get("/ai_trades", dependencies=[Depends(get_api_key)])
-def get_ai_trades(limit: int = Query(50, gt=0, le=100)):
-    """Retrieve recent AI trade logs"""
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute('SELECT * FROM ai_trade_logs ORDER BY id DESC LIMIT ?', (limit,))
-        rows = c.fetchall()
-        conn.close()
-        
-        results = []
-        for row in rows:
-            try:
-                signal_data = json.loads(row["signal_output"])
-            except:
-                signal_data = row["signal_output"]
-                
-            results.append({
-                "id": row["id"],
-                "trade_id": row["trade_id"],
-                "timestamp": row["timestamp"],
-                "pair": row["pair"],
-                "direction": row["direction"],
-                "signal_output": signal_data
-            })
-        return results
-    except Exception as e:
-        print(f"Error fetching AI trade logs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {e}")
-
-
-@app.get("/health", dependencies=[Depends(get_api_key)])
-def health():
-    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
-
-@app.post("/trade", dependencies=[Depends(get_api_key)])
-def submit_trade(req: TradeRequest):
-    direction = req.direction.upper()
-    if direction not in ("LONG", "SHORT"):
-        raise HTTPException(status_code=400, detail="direction must be LONG or SHORT")
-    
-    if req.trade_size_usd is None and req.trade_size is None:
-        raise HTTPException(status_code=400, detail="Either trade_size_usd or trade_size must be provided")
-
-    symbol = req.pair.split("/")[0].strip().upper()
-    # Use dedicated price fetcher
-    current_price = get_current_price(symbol)
-    
-    # Fallback if 0
-    if current_price == 0:
-        current_price = build_market_analysis(symbol).get("current_price", 0.0)
-
-    # Determine position size string for the signal dictionary
-    if req.trade_size_usd:
-        # Convert USD to a rough percentage for logging/display if needed
-        # This part is tricky without account value, so we'll just log the USD
-        position_size_str = f"${req.trade_size_usd}"
-    else:
-        position_size_str = f"{req.trade_size}%"
-
-    signal = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "pair": req.pair,
-        "current_price": current_price,
-        "signal": direction,
-        "confidence": "MANUAL",
-        "entry_zone": [],
-        "targets": [req.profit_take] if req.profit_take is not None else [],
-        "stop_loss": None,
-        "rr_ratio": 0.0,
-        "position_size": position_size_str, # For display
-        "leverage": f"{int(req.leverage)}x",
-        "rationale_short": "Manual API trade",
-        "time_horizon": "manual",
-        "volatility_regime": "UNKNOWN"
+        <!-- Desktop Header (Hidden on Mobile) -->
+        <div class="hidden md:grid grid-cols-8 gap-4 px-4 py-2 text-[10px] font-bold opacity-50 uppercase tracking-wider border-b border-white/10 mb-1">
+          <div class="col-span-2">Time</div>
+          <div class="col-span-1">Side</div>
+          <div class="col-span-1 text-right">Price</div>
+          <div class="col-span-1 text-right">Size</div>
+          <div class="col-span-1 text-right">Value</div>
+          <div class="col-span-1 text-right">Fee</div>
+          <div class="col-span-1 text-right">PnL</div>
+        </div>
+
+        <div id="trade-history-container" class="flex flex-col gap-3 md:gap-0 max-h-[400px] overflow-y-auto pr-1">
+          <div class="glass rounded-xl p-4 text-center opacity-50">Loading history...</div>
+        </div>
+      </div>
+
+      <!-- Tab Content: AI Logs -->
+      <div id="tab-content-ai-logs" class="hidden">
+        <div id="ai-logs-container" class="flex flex-col gap-3 max-h-[600px] overflow-y-auto pr-1">
+            <div class="glass rounded-xl p-6 text-center opacity-50">Loading AI logs...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="text-center mt-6 opacity-60 text-xs md:text-sm">
+      <p>Microhyper@2025 • <span id="clock"></span></p>
+    </div>
+  </div>
+
+  <script>
+    // Removed const API_BASE. Using dynamic getter.
+    function getApiBase() {
+      return localStorage.getItem('MICROHYPER_API_BASE') || sessionStorage.getItem('MICROHYPER_API_BASE') || "https://test.me";
     }
     
-    info_client, exchange_client = _init_hyperliquid_clients()
-    if not exchange_client:
-        return {"status": "analysis_only", "signal": signal}
+    // --- Auth Logic ---
+    function getStoredKey() {
+      return sessionStorage.getItem('MICROHYPER_API_KEY') || localStorage.getItem('MICROHYPER_API_KEY');
+    }
+
+    function getStoredCfCreds() {
+      const id = sessionStorage.getItem('MICROHYPER_CF_ID') || localStorage.getItem('MICROHYPER_CF_ID');
+      const secret = sessionStorage.getItem('MICROHYPER_CF_SECRET') || localStorage.getItem('MICROHYPER_CF_SECRET');
+      return { id, secret };
+    }
+
+    function clearStoredKey() {
+      sessionStorage.removeItem('MICROHYPER_API_KEY');
+      localStorage.removeItem('MICROHYPER_API_KEY');
+      sessionStorage.removeItem('MICROHYPER_CF_ID');
+      localStorage.removeItem('MICROHYPER_CF_ID');
+      sessionStorage.removeItem('MICROHYPER_CF_SECRET');
+      localStorage.removeItem('MICROHYPER_CF_SECRET');
+    }
+
+    axios.interceptors.request.use(config => {
+      const apiKey = getStoredKey();
+      const { id, secret } = getStoredCfCreds();
+
+      if (apiKey) {
+        config.headers['X-API-Key'] = apiKey;
+      }
+      if (id && secret) {
+        config.headers['CF-Access-Client-Id'] = id;
+        config.headers['CF-Access-Client-Secret'] = secret;
+      }
+      return config;
+    }, error => Promise.reject(error));
+
+    axios.interceptors.response.use(response => response, error => {
+      if (error.response && (error.response.status === 403 || error.response.status === 401)) {
+        clearStoredKey();
+        showApiKeyModal();
+      }
+      return Promise.reject(error);
+    });
+
+    function showApiKeyModal() {
+      const modal = document.getElementById('api-key-modal');
+      // Pre-fill endpoint
+      document.getElementById('api-endpoint').value = getApiBase();
+      
+      modal.classList.remove('hidden');
+      // Small delay to allow display change to render before opacity transition
+      setTimeout(() => {
+        modal.classList.add('show');
+      }, 10);
+    }
+
+    function saveApiKey() {
+      const input = document.getElementById('api-key-input');
+      const cfIdInput = document.getElementById('cf-client-id');
+      const cfSecretInput = document.getElementById('cf-client-secret');
+      const endpointInput = document.getElementById('api-endpoint');
+      const rememberMe = document.getElementById('remember-me').checked;
+      
+      const key = input.value.trim();
+      const cfId = cfIdInput.value.trim();
+      const cfSecret = cfSecretInput.value.trim();
+      const endpoint = endpointInput.value.trim() || "https://test.me";
+      
+      if (key) {
+        if (rememberMe) {
+          localStorage.setItem('MICROHYPER_API_KEY', key);
+          localStorage.setItem('MICROHYPER_API_BASE', endpoint);
+          if (cfId) localStorage.setItem('MICROHYPER_CF_ID', cfId);
+          if (cfSecret) localStorage.setItem('MICROHYPER_CF_SECRET', cfSecret);
+        } else {
+          sessionStorage.setItem('MICROHYPER_API_KEY', key);
+          sessionStorage.setItem('MICROHYPER_API_BASE', endpoint);
+          if (cfId) sessionStorage.setItem('MICROHYPER_CF_ID', cfId);
+          if (cfSecret) sessionStorage.setItem('MICROHYPER_CF_SECRET', cfSecret);
+        }
         
-    # Pass notional_usd directly to place_trade
-    result = place_trade(
-        exchange_client, 
-        info_client, 
-        signal, 
-        follow_signal=req.follow_signal,
-        notional_usd=req.trade_size_usd
-    )
-    return {"status": result.get("status"), "detail": result, "signal": signal}
+        const modal = document.getElementById('api-key-modal');
+        modal.classList.remove('show');
+        // Wait for transition to finish before hiding
+        setTimeout(() => {
+          modal.classList.add('hidden');
+        }, 500);
+        
+        fetchStatus();
+        fetchMiniChart();
+        fetchHistory();
+        fetchAiLogs();
+      } else {
+        input.classList.add('border-red-500');
+      }
+    }
+    // ------------------
 
+    let selectedDirection = "LONG";
+    let chartInterval = "3m"; // Default to 3m
+    let lastFetchedTrades = [];
+    let currentHistoryRange = 24;
+    let currentTab = 'trades';
+    let lastAiSignal = null; // Store last AI signal for modal execution
 
-@app.post("/ask_ai", dependencies=[Depends(get_api_key)])
-def ask_ai(req: AskAIRequest):
-    symbol = req.pair.split("/")[0].strip().upper()
-    
-    # 1. Analyze market
-    market_data = build_market_analysis(symbol)
-    print("ask ai - market data:", market_data)
-    
-    # 2. Get AI decision
-    #ai_decision = get_trading_signal(market_data)
-    ai_decision = ask_ai_trading_signal_version2(market_data)  # Use the more detailed function for /ask_ai  
-    print("ask ai:", ai_decision)
-    return {"status": "ok", "ai_response": ai_decision}
+    // --- Tab Logic ---
+    function switchTab(tab) {
+        currentTab = tab;
+        
+        const btnTrades = document.getElementById('tab-btn-trades');
+        const btnAi = document.getElementById('tab-btn-ai-logs');
+        const contentTrades = document.getElementById('tab-content-trades');
+        const contentAi = document.getElementById('tab-content-ai-logs');
+        
+        if (tab === 'trades') {
+            btnTrades.className = "pb-2 border-b-2 border-violet-500 text-white font-bold flex items-center gap-2 transition-all";
+            btnAi.className = "pb-2 border-b-2 border-transparent text-white/50 hover:text-white font-bold flex items-center gap-2 transition-all";
+            contentTrades.classList.remove('hidden');
+            contentAi.classList.add('hidden');
+            fetchHistory();
+        } else {
+            btnAi.className = "pb-2 border-b-2 border-violet-500 text-white font-bold flex items-center gap-2 transition-all";
+            btnTrades.className = "pb-2 border-b-2 border-transparent text-white/50 hover:text-white font-bold flex items-center gap-2 transition-all";
+            contentAi.classList.remove('hidden');
+            contentTrades.classList.add('hidden');
+            fetchAiLogs();
+        }
+    }
 
-@app.post("/trade/ai", dependencies=[Depends(get_api_key)])
-def submit_ai_trade(req: AITradeRequest):
-    symbol = req.pair.split("/")[0].strip().upper()
-    
-    # 1. Analyze market
-    market_data = build_market_analysis(symbol)
-    
-    # 2. Get AI decision
-    ##ai_decision = get_trading_signal(market_data)
-    ai_decision = ask_ai_trading_signal_version2(market_data)
-    direction = ai_decision.get("signal")
-    
-    # Log the AI decision
-    log_ai_trade(req.pair, direction, ai_decision)
-    
-    if direction not in ("LONG", "SHORT"):
-        return {"status": "skipped", "reason": f"AI decided not to trade or invalid signal: {direction}", "ai_response": ai_decision}
+    async function fetchAiLogs() {
+        try {
+            const res = await axios.get(`${getApiBase()}/ai_trades?limit=50`);
+            renderAiLogs(res.data);
+        } catch (err) {
+            console.error("Failed to fetch AI logs:", err);
+        }
+    }
 
-    # 3. Construct signal for place_trade
-    # Use dedicated price fetcher
-    current_price = get_current_price(symbol)
-    
-    # Fallback if 0
-    if current_price == 0:
-        current_price = build_market_analysis(symbol).get("current_price", 0.0)
- 
-    signal = {
-        "pair": req.pair,
-        "signal": direction,
-        "current_price": current_price,
-        "leverage": f"{int(req.leverage)}x",
-        "targets": [], # No TP as requested
-        "stop_loss": None, 
-        "position_size": "0%", # Placeholder
+    function renderAiLogs(logs) {
+        const container = document.getElementById('ai-logs-container');
+        if (!logs || logs.length === 0) {
+            container.innerHTML = '<div class="glass rounded-xl p-6 text-center opacity-50">No AI logs found.</div>';
+            return;
+        }
+
+        container.innerHTML = logs.map(log => {
+            const date = new Date(log.timestamp);
+            const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            const signal = log.signal_output || {};
+            const direction = log.direction || signal.signal || 'N/A';
+            const isLong = direction === 'LONG';
+            const colorClass = isLong ? 'text-green-400' : (direction === 'SHORT' ? 'text-red-400' : 'text-white');
+            const bgClass = isLong ? 'bg-green-500/10 border-green-500/20' : (direction === 'SHORT' ? 'bg-red-500/10 border-red-500/20' : 'bg-white/5 border-white/10');
+            
+            const confidence = signal.confidence || 'N/A';
+            const rationale = signal.rationale_short || 'No rationale provided.';
+            const score = signal.score !== undefined ? signal.score.toFixed(2) : 'N/A';
+            const timeframe = signal.timeframe_bias || 'N/A';
+
+            return `
+            <div class="glass rounded-xl p-4 border ${bgClass} hover:bg-white/5 transition-colors">
+                <div class="flex justify-between items-start mb-2">
+                    <div class="flex items-center gap-3">
+                        <span class="font-bold text-sm ${colorClass} px-2 py-0.5 rounded bg-black/30 border border-white/5">${direction}</span>
+                        <span class="text-xs opacity-60 font-mono">${log.pair}</span>
+                    </div>
+                    <span class="text-[10px] opacity-40">${dateStr}</span>
+                </div>
+                
+                <div class="mb-3">
+                    <p class="text-xs opacity-90 leading-relaxed italic">"${rationale}"</p>
+                </div>
+                
+                <div class="flex flex-wrap gap-2 text-[10px] uppercase tracking-wide opacity-70">
+                    <div class="px-2 py-1 rounded bg-black/20 border border-white/5">
+                        Conf: <span class="font-bold text-white">${confidence}</span>
+                    </div>
+                    <div class="px-2 py-1 rounded bg-black/20 border border-white/5">
+                        Score: <span class="font-bold text-white">${score}</span>
+                    </div>
+                    <div class="px-2 py-1 rounded bg-black/20 border border-white/5">
+                        TF: <span class="font-bold text-white">${timeframe}</span>
+                    </div>
+                </div>
+            </div>
+            `;
+        }).join('');
+    }
+
+    function updateHistoryRange(val) {
+      currentHistoryRange = parseInt(val);
+      document.getElementById('history-range-label').textContent = val + 'h';
+      if (lastFetchedTrades) {
+        renderHistory(lastFetchedTrades);
+      }
+    }
+
+    function formatPrice(num) {
+      if (num === null || num === undefined || isNaN(num)) return 'N/A';
+      const val = parseFloat(num);
+      if (val === 0) return '0.00';
+      const absVal = Math.abs(val);
+      if (absVal < 0.00001) return val.toExponential(4);
+      if (absVal < 1) return val.toFixed(6).replace(/\.?0+$/, "");
+      if (absVal < 10) return val.toFixed(4).replace(/\.?0+$/, "");
+      return val.toFixed(2);
+    }
+
+    function setLoading(isLoading, btnId = null) {
+      const buttons = document.querySelectorAll('button');
+      buttons.forEach(btn => {
+        if (isLoading) {
+          btn.disabled = true;
+          btn.classList.add('opacity-50', 'cursor-not-allowed');
+        } else {
+          btn.disabled = false;
+          btn.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
+      });
+
+      if (btnId) {
+        const btn = document.getElementById(btnId);
+        if (isLoading) {
+          const originalContent = btn.innerHTML;
+          btn.setAttribute('data-original-content', originalContent);
+          btn.innerHTML = `<i class="fas fa-circle-notch spin"></i>`;
+        } else {
+          const originalContent = btn.getAttribute('data-original-content');
+          if (originalContent) btn.innerHTML = originalContent;
+        }
+      }
+    }
+
+    function showToast(message, isError = false) {
+      const toast = document.getElementById("toast");
+      const toastMessage = document.getElementById("toast-message");
+      
+      toastMessage.textContent = message;
+      toast.className = `fixed bottom-5 right-5 z-50 text-white py-2 px-4 rounded-lg shadow-lg`; // Reset classes
+      if (isError) {
+        toast.classList.add('bg-red-600');
+      } else {
+        toast.classList.add('bg-green-600');
+      }
+      
+      toast.classList.remove('hidden');
+      setTimeout(() => {
+        toast.classList.add('show');
+      }, 10); // Small delay to trigger transition
+
+      setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => {
+          toast.classList.add('hidden');
+        }, 500);
+      }, 3000);
+    }
+
+    async function executeTrade(direction, counter = false) {
+      // Fallback to currently selectedDirection if direction not provided
+      const finalDirection = direction || selectedDirection;
+      
+      const btnId = finalDirection === 'LONG' ? 'btn-long' : 'btn-short';
+      const btn = document.getElementById(btnId);
+      const originalContent = btn ? btn.innerHTML : '';
+      if(btn) btn.innerHTML = `<i class="fas fa-circle-notch spin"></i>`;
+      
+      setLoading(true);
+      
+      const payload = {
+        pair: document.getElementById("pair").value,
+        direction: finalDirection,
+        leverage: parseFloat(document.getElementById("leverage").value),
+        trade_size_usd: parseFloat(document.getElementById("size_usd").value) * parseFloat(document.getElementById("leverage").value),
+        profit_take: document.getElementById("tp_price").value ? parseFloat(document.getElementById("tp_price").value) : null,
+        follow_signal: !counter
+      };
+      try {
+        const res = await axios.post(`${getApiBase()}/trade`, payload);
+        if (res.data.status === 'filled') {
+          showToast(`Trade executed successfully! Size: ${res.data.detail.size}`);
+        } else {
+          showToast(`Trade status: ${res.data.status}. ${res.data.detail?.detail || ''}`, true);
+        }
+        fetchStatus();
+        fetchHistory();
+      } catch (err) {
+        const errorMessage = err.response?.data?.detail || err.message;
+        const isCors = err.code === "ERR_NETWORK" && !err.response;
+        if (isCors) {
+            console.warn("CORS Error detected. If using Cloudflare Access, ensure CORS is configured in Zero Trust Dashboard > Access > Applications > Settings > CORS Settings.");
+            showToast("Network Error (CORS? Check Console)", true);
+        } else {
+            showToast(`Trade failed: ${errorMessage}`, true);
+        }
+      } finally {
+        setLoading(false);
+        if(btn) btn.innerHTML = originalContent;
+      }
+    }
+
+    async function executeAITrade() {
+      const btn = document.getElementById('btn-ai');
+      const originalContent = btn.innerHTML;
+      btn.innerHTML = `<i class="fas fa-circle-notch spin"></i>`;
+      setLoading(true);
+
+      const payload = {
+        pair: document.getElementById("pair").value,
+        leverage: parseFloat(document.getElementById("leverage").value),
+        trade_size_usd: parseFloat(document.getElementById("size_usd").value) * parseFloat(document.getElementById("leverage").value)
+      };
+      
+      showToast("AI Analyzing market...", false);
+      
+      try {
+        const res = await axios.post(`${getApiBase()}/trade/ai`, payload);
+        if (res.data.status === 'filled') {
+          const direction = res.data.signal.signal;
+          showToast(`AI Executed ${direction}! Size: ${res.data.detail.size}`);
+        } else if (res.data.status === 'skipped') {
+           showToast(`AI decided to wait: ${res.data.reason}`, true);
+        } else {
+          showToast(`Trade status: ${res.data.status}. ${res.data.detail?.detail || ''}`, true);
+        }
+        fetchStatus();
+        fetchHistory();
+        fetchAiLogs(); // Refresh AI logs
+      } catch (err) {
+        const errorMessage = err.response?.data?.detail || err.message;
+        const isCors = err.code === "ERR_NETWORK" && !err.response;
+        if (isCors) {
+            console.warn("CORS Error detected. If using Cloudflare Access, ensure CORS is configured in Zero Trust Dashboard.");
+            showToast("Network Error (CORS? Check Console)", true);
+        } else {
+            showToast(`AI Trade failed: ${errorMessage}`, true);
+        }
+      } finally {
+        setLoading(false);
+        btn.innerHTML = originalContent;
+      }
+    }
+
+    async function askAi() {
+        const btn = document.getElementById('btn-ask-ai');
+        const originalContent = btn.innerHTML;
+        btn.innerHTML = `<i class="fas fa-circle-notch spin"></i>`;
+        setLoading(true);
+        
+        const modal = document.getElementById('ai-response-modal');
+        const content = document.getElementById('ai-response-content');
+        const tradeBtn = document.getElementById('btn-modal-trade');
+        
+        // Reset modal content
+        content.innerHTML = `
+            <div class="flex flex-col items-center justify-center py-8 gap-4">
+                <i class="fas fa-circle-notch spin text-3xl text-violet-400"></i>
+                <p class="opacity-60 animate-pulse">Analyzing market structure...</p>
+            </div>
+        `;
+        tradeBtn.classList.add('hidden');
+        
+        modal.classList.remove('hidden');
+        setTimeout(() => modal.classList.add('show'), 10);
+
+        const pair = document.getElementById("pair").value;
+
+        try {
+            const res = await axios.post(`${getApiBase()}/ask_ai`, { pair });
+            const aiData = res.data.ai_response;
+            lastAiSignal = aiData; // Store for potential execution
+
+            const direction = aiData.signal;
+            const isLong = direction === 'LONG';
+            const colorClass = isLong ? 'text-green-400' : (direction === 'SHORT' ? 'text-red-400' : 'text-white');
+            
+            content.innerHTML = `
+                <div class="flex items-center justify-between border-b border-white/10 pb-4">
+                    <div>
+                        <div class="text-xs opacity-50 uppercase tracking-wide">Signal</div>
+                        <div class="text-2xl font-bold ${colorClass}">${direction}</div>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-xs opacity-50 uppercase tracking-wide">Confidence</div>
+                        <div class="text-xl font-bold">${aiData.confidence}</div>
+                    </div>
+                </div>
+                
+                <div class="bg-white/5 rounded-lg p-4 border border-white/10">
+                    <div class="text-xs opacity-50 uppercase tracking-wide mb-1">Rationale</div>
+                    <p class="text-sm italic opacity-90 leading-relaxed">"${aiData.rationale || aiData.rationale_short}"</p>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="bg-white/5 rounded-lg p-3 border border-white/10">
+                        <div class="text-[10px] opacity-50 uppercase tracking-wide">Key Level</div>
+                        <div class="font-mono font-bold">${aiData.key_level || 'N/A'}</div>
+                    </div>
+                    <div class="bg-white/5 rounded-lg p-3 border border-white/10">
+                        <div class="text-[10px] opacity-50 uppercase tracking-wide">Timeframe</div>
+                        <div class="font-mono font-bold">${aiData.timeframe_bias || 'N/A'}</div>
+                    </div>
+                </div>
+            `;
+            
+            // Show trade button if valid signal
+            if (direction === 'LONG' || direction === 'SHORT') {
+                tradeBtn.textContent = `Execute ${direction}`;
+                tradeBtn.onclick = () => executeTradeFromModal(direction);
+                tradeBtn.className = `flex-1 py-2 rounded-lg btn-primary font-bold text-white ${isLong ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`;
+                tradeBtn.classList.remove('hidden');
+            }
+
+        } catch (err) {
+            const errorMessage = err.response?.data?.detail || err.message;
+            content.innerHTML = `
+                <div class="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-center">
+                    <i class="fas fa-exclamation-triangle text-red-400 text-2xl mb-2"></i>
+                    <p class="text-red-200">Analysis Failed</p>
+                    <p class="text-xs opacity-60 mt-1">${errorMessage}</p>
+                </div>
+            `;
+        } finally {
+            setLoading(false);
+            btn.innerHTML = originalContent;
+        }
+    }
+
+    function closeAiModal(event) {
+        if (event && event.target !== event.currentTarget) return; // Only close if clicking backdrop or close button
+        
+        const modal = document.getElementById('ai-response-modal');
+        modal.classList.remove('show');
+        setTimeout(() => {
+            modal.classList.add('hidden');
+        }, 500);
+    }
+
+    function executeTradeFromModal(direction) {
+        closeAiModal();
+        // Small delay to allow modal close animation
+        setTimeout(() => {
+            executeTrade(direction);
+        }, 300);
+    }
+
+    async function cancelOpenOrders() {
+      const btn = document.getElementById('btn-cancel-orders');
+      const originalContent = btn.innerHTML;
+      btn.innerHTML = `<i class="fas fa-circle-notch spin"></i>`;
+      setLoading(true);
+
+      const pair = document.getElementById("pair").value;
+      try {
+        const res = await axios.post(`${getApiBase()}/cancel_orders`, { pair });
+        showToast(res.data.message || "Open orders cancelled");
+        fetchStatus();
+      } catch (err) {
+        const errorMessage = err.response?.data?.detail || err.message;
+        showToast(`Cancel orders failed: ${errorMessage}`, true);
+      } finally {
+        setLoading(false);
+        btn.innerHTML = originalContent;
+      }
+    }
+
+    async function closePosition() {
+      const btn = document.getElementById('btn-close-position');
+      const originalContent = btn.innerHTML;
+      btn.innerHTML = `<i class="fas fa-circle-notch spin"></i>`;
+      setLoading(true);
+
+      const pair = document.getElementById("pair").value;
+      try {
+        const res = await axios.post(`${getApiBase()}/close_position`, { pair });
+        showToast(res.data.message || "Position close submitted");
+        fetchStatus();
+        // Small delay to allow fill to happen before history refresh
+        setTimeout(fetchHistory, 1000);
+      } catch (err) {
+        const errorMessage = err.response?.data?.detail || err.message;
+        showToast(`Close position failed: ${errorMessage}`, true);
+      } finally {
+        setLoading(false);
+        btn.innerHTML = originalContent;
+      }
+    }
+
+    async function updateTP() {
+      const btn = document.getElementById('btn-update-tp');
+      const originalContent = btn.innerHTML;
+      btn.innerHTML = `<i class="fas fa-circle-notch spin"></i>`;
+      setLoading(true);
+
+      const pair = document.getElementById("pair").value;
+      const price = parseFloat(document.getElementById("tp_price").value);
+
+      if (!price || isNaN(price)) {
+        showToast("Please enter a valid TP price", true);
+        setLoading(false);
+        btn.innerHTML = originalContent;
+        return;
+      }
+
+      try {
+        const res = await axios.post(`${getApiBase()}/update_tp`, { pair, price });
+        showToast("TP Updated Successfully");
+        fetchStatus();
+      } catch (err) {
+        const errorMessage = err.response?.data?.detail || err.message;
+        showToast(`Update TP failed: ${errorMessage}`, true);
+      } finally {
+        setLoading(false);
+        btn.innerHTML = originalContent;
+      }
+    }
+
+    async function fetchHistory() {
+      try {
+        const pair = document.getElementById("pair").value;
+        const res = await axios.get(`${getApiBase()}/history?pair=${pair}`);
+        lastFetchedTrades = res.data;
+        renderHistory(res.data);
+      } catch (err) {
+        console.error("Failed to fetch history:", err);
+      }
+    }
+
+    function renderHistory(trades) {
+      const container = document.getElementById('trade-history-container');
+      const statsContainer = document.getElementById('history-stats');
+
+      if (!trades || trades.length === 0) {
+        container.innerHTML = '<div class="glass rounded-xl p-6 text-center opacity-50">No trade history found for this pair.</div>';
+        if(statsContainer) statsContainer.innerHTML = '<span class="opacity-50 text-xs">No recent activity</span>';
+        return;
+      }
+
+      // --- Calculate Stats based on dynamic range ---
+      const now = new Date();
+      const rangeMs = currentHistoryRange * 60 * 60 * 1000;
+      const rangeStart = new Date(now - rangeMs);
+      
+      const recentTrades = trades.filter(t => new Date(t.time) > rangeStart);
+      
+      let pnlRange = 0;
+      let feesRange = 0;
+      let openLongCount = 0;
+      let openShortCount = 0;
+      
+      recentTrades.forEach(t => {
+        pnlRange += t.pnl || 0;
+        feesRange += t.fee || 0;
+        const side = (t.side || '').toLowerCase();
+        
+        if (side.includes('open')) {
+            if (side.includes('long') || side.includes('buy')) openLongCount++;
+            if (side.includes('short') || side.includes('sell')) openShortCount++;
+        }
+      });
+
+      const netPnlRange = pnlRange - feesRange;
+      const rangeLabel = `${currentHistoryRange}h`;
+
+      if (statsContainer) {
+        statsContainer.innerHTML = `
+            <div class="px-2 py-1 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2" title="Realized PnL (${rangeLabel})">
+                <span class="opacity-50 uppercase tracking-wider text-[10px]">${rangeLabel} PnL</span>
+                <span class="font-mono font-bold ${pnlRange >= 0 ? 'text-green-400' : 'text-red-400'}">${pnlRange >= 0 ? '+' : ''}$${formatPrice(pnlRange)}</span>
+            </div>
+            <div class="px-2 py-1 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2" title="Total Fees (${rangeLabel})">
+                <span class="opacity-50 uppercase tracking-wider text-[10px]">Fees</span>
+                <span class="font-mono font-bold text-orange-300">$${formatPrice(feesRange)}</span>
+            </div>
+            <div class="px-2 py-1 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2" title="Net PnL after Fees (${rangeLabel})">
+                <span class="opacity-50 uppercase tracking-wider text-[10px]">Net</span>
+                <span class="font-mono font-bold ${netPnlRange >= 0 ? 'text-green-400' : 'text-red-400'}">${netPnlRange >= 0 ? '+' : ''}$${formatPrice(netPnlRange)}</span>
+            </div>
+            <div class="px-2 py-1 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2" title="Longs Opened (${rangeLabel})">
+                <span class="opacity-50 uppercase tracking-wider text-[10px]">Longs</span>
+                <span class="font-mono font-bold text-green-400">${openLongCount}</span>
+            </div>
+            <div class="px-2 py-1 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2" title="Shorts Opened (${rangeLabel})">
+                <span class="opacity-50 uppercase tracking-wider text-[10px]">Shorts</span>
+                <span class="font-mono font-bold text-red-400">${openShortCount}</span>
+            </div>
+        `;
+      }
+      
+      container.innerHTML = trades.map(t => {
+        const isProfit = t.pnl > 0;
+        const isLoss = t.pnl < 0;
+        const pnlClass = isProfit ? 'text-green-400' : (isLoss ? 'text-red-400' : 'opacity-50');
+        const pnlText = t.pnl !== 0 ? (t.pnl > 0 ? '+' : '') + `$${formatPrice(t.pnl)}` : '-';
+        
+        let sideColor = 'text-white';
+        const sideLower = t.side.toLowerCase();
+        if (sideLower.includes('long') || sideLower.includes('buy')) sideColor = 'text-green-400';
+        if (sideLower.includes('short') || sideLower.includes('sell')) sideColor = 'text-red-400';
+
+        const date = new Date(t.time);
+        const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+
+        return `
+        <div class="glass rounded-xl p-3 md:p-0 md:px-4 md:py-3 md:rounded-none md:bg-transparent md:border-0 md:border-b md:border-white/5 hover:bg-white/5 transition-colors">
+            <!-- Mobile View (Card) -->
+            <div class="md:hidden">
+                <div class="flex justify-between items-center mb-2 pb-2 border-b border-white/5">
+                    <span class="font-bold text-sm ${sideColor}">${t.side}</span>
+                    <div class="flex flex-col items-end">
+                        <span class="text-[10px] opacity-40 uppercase tracking-wider">PnL</span>
+                        <span class="font-mono font-bold text-xs ${pnlClass}">${pnlText}</span>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-y-1 text-xs opacity-80">
+                    <div class="col-span-2 flex justify-between"><span class="opacity-40">Time</span> <span>${dateStr}</span></div>
+                    <div class="flex justify-between mr-2"><span class="opacity-40">Price</span> <span>$${formatPrice(t.price)}</span></div>
+                    <div class="flex justify-between"><span class="opacity-40">Size</span> <span>${t.size.toFixed(2)}</span></div>
+                    <div class="flex justify-between mr-2"><span class="opacity-40">Value</span> <span>$${formatPrice(t.value)}</span></div>
+                    <div class="flex justify-between"><span class="opacity-40">Fee</span> <span>$${formatPrice(t.fee)}</span></div>
+                </div>
+            </div>
+
+            <!-- Desktop View (Row) -->
+            <div class="hidden md:grid grid-cols-8 gap-4 items-center text-xs">
+                <div class="col-span-2 opacity-60">${dateStr}</div>
+                <div class="col-span-1 font-bold ${sideColor}">${t.side}</div>
+                <div class="col-span-1 text-right font-mono opacity-90">$${formatPrice(t.price)}</div>
+                <div class="col-span-1 text-right font-mono opacity-90">${t.size.toFixed(2)}</div>
+                <div class="col-span-1 text-right font-mono opacity-60">$${formatPrice(t.value)}</div>
+                <div class="col-span-1 text-right font-mono opacity-60">$${formatPrice(t.fee)}</div>
+                <div class="col-span-1 text-right font-mono font-bold ${pnlClass}">${pnlText}</div>
+            </div>
+        </div>
+        `;
+      }).join('');
+    }
+
+    function renderStatus(data) {
+      const priceEl = document.getElementById('status-current-price');
+      const marginEl = document.getElementById('status-available-margin');
+      const positionEl = document.getElementById('status-open-position');
+      const ordersEl = document.getElementById('status-open-orders');
+
+      // Current Price
+      const price = parseFloat(data.current_price);
+      priceEl.innerHTML = `
+        <div class="text-xs opacity-70 uppercase tracking-wide">Price</div>
+        <div class="text-xl md:text-2xl font-bold">${price ? `$${formatPrice(price)}` : 'N/A'}</div>
+      `;
+
+      // Available Margin
+      const margin = parseFloat(data.available_margin);
+      marginEl.innerHTML = `
+        <div class="text-xs opacity-70 uppercase tracking-wide">Margin</div>
+        <div class="text-xl md:text-2xl font-bold">${margin ? `$${formatPrice(margin)}` : '$0.00'}</div>
+      `;
+
+      // Open Position
+      if (data.open_position) {
+        const pos = data.open_position;
+        const isLong = parseFloat(pos.szi) > 0;
+        const pnl = parseFloat(pos.unrealizedPnl);
+        const pnlColor = pnl >= 0 ? 'text-green-400' : 'text-red-400';
+        positionEl.innerHTML = `
+          <div class="text-xs opacity-70 uppercase tracking-wide">Position</div>
+          <div class="text-base md:text-lg font-bold ${isLong ? 'text-green-400' : 'text-red-400'} leading-tight">
+            ${isLong ? 'LONG' : 'SHORT'} ${parseFloat(pos.szi).toFixed(2)}
+          </div>
+          <div class="text-[10px] md:text-xs opacity-80 mt-0.5">@$${formatPrice(pos.entryPx)} • <span class="${pnlColor}">$${formatPrice(pnl)}</span></div>
+        `;
+      } else {
+        positionEl.innerHTML = `
+          <div class="text-xs opacity-70 uppercase tracking-wide">Position</div>
+          <div class="text-xl md:text-2xl font-bold opacity-50">-</div>
+        `;
+      }
+
+      // Open Orders
+      if (data.open_orders && data.open_orders.length > 0) {
+        const order = data.open_orders[0]; // Display first order
+        const isBuy = order.side === 'B';
+        let sideText = isBuy ? 'BUY' : 'SELL';
+        if (order.reduceOnly) {
+             sideText = isBuy ? 'Close Short' : 'Close Long';
+        }
+        // Shorten side text for mobile if needed
+        if (sideText === 'Close Short') sideText = 'Cl. Short';
+        if (sideText === 'Close Long') sideText = 'Cl. Long';
+
+        ordersEl.innerHTML = `
+          <div class="text-xs opacity-70 uppercase tracking-wide">Order</div>
+          <div class="text-base md:text-lg font-bold ${isBuy ? 'text-green-400' : 'text-red-400'} leading-tight">
+            ${sideText} ${parseFloat(order.sz).toFixed(2)}
+          </div>
+           <div class="text-[10px] md:text-xs opacity-60 mt-0.5">@$${formatPrice(order.limitPx)}${data.open_orders.length > 1 ? ` (+${data.open_orders.length - 1})`: ''}</div>
+        `;
+      } else {
+        ordersEl.innerHTML = `
+          <div class="text-xs opacity-70 uppercase tracking-wide">Orders</div>
+          <div class="text-xl md:text-2xl font-bold opacity-50">-</div>
+        `;
+      }
+
+      // Update Chart Overlay
+      const overlayEl = document.getElementById('chart-overlay');
+      const liqEl = document.getElementById('overlay-liq');
+      const pnlEl = document.getElementById('overlay-pnl');
+
+      if (data.open_position) {
+        const pos = data.open_position;
+        const liq = pos.liquidationPx ? parseFloat(pos.liquidationPx) : null;
+        const pnl = parseFloat(pos.unrealizedPnl);
+        
+        if (overlayEl) overlayEl.classList.remove('hidden');
+        if (liqEl) liqEl.textContent = liq ? `$${formatPrice(liq)}` : 'N/A';
+        if (pnlEl) {
+            pnlEl.textContent = (pnl >= 0 ? '+' : '') + `$${formatPrice(pnl)}`;
+            pnlEl.className = `font-mono font-bold ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`;
+        }
+      } else {
+        if (overlayEl) overlayEl.classList.add('hidden');
+      }
+    }
+
+    async function fetchStatus() {
+      try {
+        const pair = document.getElementById("pair").value;
+        const res = await axios.get(`${getApiBase()}/status?pair=${pair}`);
+        renderStatus(res.data);
+      } catch (err) {
+        console.error("Failed to fetch status:", err);
+        // Optionally show a toast for status fetch failure
+      }
+    }
+
+    function setChartInterval(interval) {
+      chartInterval = interval;
+      // Update UI
+      document.getElementById('btn-1m').className = `px-2 py-0.5 rounded text-[10px] transition-colors ${interval === '1m' ? 'bg-violet-500/50 text-white font-bold' : 'hover:bg-white/10'}`;
+      document.getElementById('btn-3m').className = `px-2 py-0.5 rounded text-[10px] transition-colors ${interval === '3m' ? 'bg-violet-500/50 text-white font-bold' : 'hover:bg-white/10'}`;
+      fetchMiniChart();
+    }
+
+    async function fetchMiniChart() {
+      try {
+        const pair = document.getElementById("pair").value;
+        const symbol = pair.split("/")[0];
+        // Request enough candles for ~2 hours history
+        // 1m: 120 candles = 2 hours
+        // 3m: 40 candles = 2 hours (but let's keep 60 for 3h history which is better context)
+        const limit = chartInterval === '1m' ? 120 : 60;
+        
+        const res = await axios.get(`${getApiBase()}/ohlcv?symbol=${symbol}&interval=${chartInterval}&limit=${limit}`);
+        const data = res.data || [];
+        if (!Array.isArray(data) || data.length === 0) return;
+
+        drawMiniChart(data, pair);
+      } catch (err) {
+        console.error("Failed to fetch mini chart:", err);
+      }
+    }
+
+    function drawMiniChart(data, pair) {
+      const canvas = document.getElementById("mini-chart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      
+      // Handle high DPI
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = 180 * dpr;
+      ctx.scale(dpr, dpr);
+
+      const w = rect.width;
+      const h = 180;
+
+      ctx.clearRect(0, 0, w, h);
+
+      // Margins
+      const padTop = 10;
+      const padBottom = 20;
+      const padRight = 50; // Space for price labels
+      const padLeft = 5;
+
+      const chartW = w - padLeft - padRight;
+      const chartH = h - padTop - padBottom;
+
+      // Min/Max
+      let minP = Infinity, maxP = -Infinity;
+      data.forEach(d => {
+        if (d.low < minP) minP = d.low;
+        if (d.high > maxP) maxP = d.high;
+      });
+      const range = maxP - minP || 1;
+      // Add padding to range
+      minP -= range * 0.1;
+      maxP += range * 0.1;
+      const paddedRange = maxP - minP;
+
+      const xFor = (i) => padLeft + (i * (chartW / data.length)) + ((chartW / data.length) / 2);
+      const yFor = (p) => padTop + chartH - ((p - minP) / paddedRange) * chartH;
+
+      // Draw Grid & Axes
+      ctx.font = "10px sans-serif";
+      
+      // Y-Axis (Price) - 6 ticks
+      const numYTicks = 6;
+      for (let i = 0; i < numYTicks; i++) {
+        const p = minP + (i * (paddedRange / (numYTicks - 1)));
+        const y = yFor(p);
+        
+        // Grid line
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+        ctx.beginPath();
+        ctx.moveTo(padLeft, y);
+        ctx.lineTo(w - padRight, y);
+        ctx.stroke();
+
+        // Label
+        ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+        ctx.textAlign = "left";
+        ctx.fillText(formatPrice(p), w - padRight + 5, y + 3);
+      }
+
+      // X-Axis (Time) - 6 ticks
+      const numXTicks = 6;
+      for (let i = 0; i < numXTicks; i++) {
+        const idx = Math.floor((data.length - 1) * (i / (numXTicks - 1)));
+        const d = data[idx];
+        const x = xFor(idx);
+        
+        // Grid line
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+        ctx.beginPath();
+        ctx.moveTo(x, padTop);
+        ctx.lineTo(x, h - padBottom);
+        ctx.stroke();
+
+        // Label
+        const date = new Date(d.time);
+        const tStr = date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+        ctx.textAlign = "center";
+        ctx.fillText(tStr, x, h - 5);
+      }
+
+      // Draw Candles
+      const candleW = (chartW / data.length) * 0.6;
+
+      data.forEach((d, i) => {
+        const x = xFor(i);
+        const yO = yFor(d.open);
+        const yC = yFor(d.close);
+        const yH = yFor(d.high);
+        const yL = yFor(d.low);
+
+        const isUp = d.close >= d.open;
+        const color = isUp ? "#22c55e" : "#ef4444";
+
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 1;
+
+        // Wick
+        ctx.beginPath();
+        ctx.moveTo(x, yH);
+        ctx.lineTo(x, yL);
+        ctx.stroke();
+
+        // Body
+        const bodyH = Math.max(Math.abs(yC - yO), 1);
+        const bodyY = Math.min(yO, yC);
+        ctx.fillRect(x - candleW / 2, bodyY, candleW, bodyH);
+      });
+
+      // Current Price Line & Label
+      const last = data[data.length - 1];
+      const yLast = yFor(last.close);
+      
+      // Line
+      ctx.strokeStyle = "rgba(251, 191, 36, 0.5)";
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padLeft, yLast);
+      ctx.lineTo(w - padRight, yLast);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Label Highlight
+      ctx.fillStyle = "#fbbf24";
+      ctx.textAlign = "left";
+      ctx.fillText(formatPrice(last.close), w - padRight + 5, yLast + 3);
+
+      // Update Header Label
+      const labelEl = document.getElementById("mini-chart-label");
+      if (labelEl) {
+        const first = data[0].open;
+        const current = last.close;
+        const pct = ((current - first) / first) * 100;
+        const colorClass = pct >= 0 ? "text-green-400" : "text-red-400";
+        labelEl.innerHTML = `${pair} <span class="${colorClass}">${formatPrice(current)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)</span>`;
+      }
     }
     
-    info_client, exchange_client = _init_hyperliquid_clients()
-    if not exchange_client:
-        return {"status": "analysis_only", "signal": signal, "ai_response": ai_decision}
+    document.getElementById("pair").addEventListener("change", () => {
+      fetchStatus();
+      fetchMiniChart();
+      fetchHistory();
+    });
 
-    result = place_trade(
-        exchange_client, 
-        info_client, 
-        signal, 
-        follow_signal=True,
-        notional_usd=req.trade_size_usd
-    )
+    // Live clock & status refresh
+    setInterval(() => {
+      document.getElementById("clock").textContent = new Date().toLocaleTimeString();
+      if (getStoredKey()) {
+        fetchStatus();
+        fetchMiniChart();
+        // Refresh based on active tab
+        if (currentTab === 'trades') {
+            fetchHistory();
+        } else if (currentTab === 'ai-logs') {
+            fetchAiLogs();
+        }
+      }
+    }, 5000); // Refresh every 5 seconds
     
-    return {"status": result.get("status"), "detail": result, "signal": signal, "ai_rationale": ai_decision.get("rationale_short")}
-
-
-@app.post("/update_tp", dependencies=[Depends(get_api_key)])
-def update_tp(req: UpdateTPRequest):
-    symbol = req.pair.split("/")[0].strip().upper()
-    info_client, exchange_client = _init_hyperliquid_clients()
-    if not exchange_client or not HYPER_WALLET_ADDRESS:
-        raise HTTPException(status_code=400, detail="Trading wallet not configured")
-        
-    try:
-        # 1. Get Position
-        position = get_open_position(info_client, HYPER_WALLET_ADDRESS, symbol)
-        if not position:
-            raise HTTPException(status_code=400, detail=f"No open position for {symbol}")
-        
-        size = float(position['szi'])
-        if size == 0:
-            raise HTTPException(status_code=400, detail="Position size is 0")
-            
-        is_long = size > 0
-        abs_size = abs(size)
-        
-        # 2. Cancel existing orders
-        open_orders = info_client.open_orders(HYPER_WALLET_ADDRESS)
-        symbol_orders = [o for o in open_orders if o.get("coin") == symbol]
-        for o in symbol_orders:
-            oid = o.get("oid") or o.get("orderId")
-            if oid:
-                try:
-                    exchange_client.cancel(symbol, oid)
-                except Exception as e:
-                    print(f"Failed to cancel order {oid}: {e}")
-        
-        # 3. Place new TP
-        is_buy = not is_long
-        print(f"Placing TP for {symbol}: {'Buy' if is_buy else 'Sell'} {abs_size} @ {req.price}")
-        
-        result = exchange_client.order(
-            symbol, 
-            is_buy, 
-            abs_size, 
-            req.price, 
-            {"limit": {"tif": "Gtc"}}, 
-            reduce_only=True
-        )
-        
-        if result.get("status") == "ok":
-            # Check for inner errors
-            for status in result["response"]["data"]["statuses"]:
-                if "error" in status:
-                    raise Exception(status["error"])
-            return {"status": "ok", "detail": result}
-        else:
-            raise Exception(f"Order failed: {result}")
-
-    except Exception as e:
-        print(f"Error updating TP: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/cancel_orders", dependencies=[Depends(get_api_key)])
-def cancel_orders(payload: dict):
-    pair = payload.get("pair", "SOL/USD")
-    symbol = pair.split("/")[0].strip().upper()
-    info_client, exchange_client = _init_hyperliquid_clients()
-    if not exchange_client or not HYPER_WALLET_ADDRESS:
-        raise HTTPException(status_code=400, detail="Trading wallet not configured")
-    try:
-        open_orders = info_client.open_orders(HYPER_WALLET_ADDRESS)
-        print(f"[cancel_orders] All open orders: {json.dumps(open_orders, indent=2)}")
-        symbol_orders = [o for o in open_orders if o.get("coin") == symbol]
-        print(f"[cancel_orders] Orders for {symbol}: {json.dumps(symbol_orders, indent=2)}")
-        if not symbol_orders:
-            return {"status": "ok", "message": f"No open orders for {symbol}"}
-        cancelled = 0
-        for o in symbol_orders:
-            oid = o.get("oid") or o.get("orderId") or o.get("oid_str")
-            print(f"[cancel_orders] Attempting cancel for order: {o}")
-            if oid is None:
-                continue
-            try:
-                # Hyperliquid Exchange.cancel requires (coin, oid)
-                resp = exchange_client.cancel(symbol, oid)
-                cancelled += 1
-                print(f"[cancel_orders] Cancel response for {symbol} oid={oid}: {json.dumps(resp, indent=2)}")
-            except Exception as e:
-                print(f"[cancel_orders] Failed to cancel order {oid}: {e}")
-        return {"status": "ok", "message": f"Cancelled {cancelled} order(s) for {symbol}"}
-    except Exception as e:
-        print(f"Error cancelling orders: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to cancel orders: {e}")
-
-
-@app.post("/close_position", dependencies=[Depends(get_api_key)])
-def close_position(payload: dict):
-    pair = payload.get("pair", "SOL/USD")
-    symbol = pair.split("/")[0].strip().upper()
-    info_client, exchange_client = _init_hyperliquid_clients()
-    if not exchange_client or not HYPER_WALLET_ADDRESS:
-        raise HTTPException(status_code=400, detail="Trading wallet not configured")
-    try:
-        print(f"[close_position] Request received for pair={pair}, symbol={symbol}")
-        position = get_open_position(info_client, HYPER_WALLET_ADDRESS, symbol)
-        print(f"[close_position] Current position: {position}")
-        if not position:
-            return {"status": "ok", "message": f"No open position for {symbol}"}
-        raw_szi = float(position.get("szi", 0))
-        size = abs(raw_szi)
-        if size <= 0:
-            return {"status": "ok", "message": f"No size to close for {symbol}"}
-        is_long = raw_szi > 0
-        print(f"[close_position] Submitting close. is_long={is_long}, size={size}")
-        # Explicit market close using market_open with reduceOnly instead of market_close helper
-        try:
-            # Hyperliquid python client doesn't expose reduceOnly directly on market_open,
-            # so we call the generic order API with a market order and reduceOnly flag.
-            side_is_buy = not is_long  # opposite side to close
-            order_payload = {
-                "coin": symbol,
-                "isBuy": side_is_buy,
-                "sz": size,
-                "orderType": {"market": {"tif": "Ioc"}},
-                "reduceOnly": True,
-            }
-            print(f"[close_position] Market close payload: {order_payload}")
-            result = exchange_client.order(order_payload["coin"], order_payload["isBuy"], order_payload["sz"], None, order_payload["orderType"], reduce_only=True)
-            print(f"[close_position] Market close result: {json.dumps(result, indent=2)}")
-        except Exception as e_order:
-            print(f"[close_position] Primary close failed, trying fallback. Error: {e_order}")
-            try:
-                exchange_client.market_open(symbol, not is_long, size, None, 0.1)
-            except Exception as e2:
-                print(f"[close_position] Fallback close also failed: {e2}")
-                raise Exception(f"Failed to submit close order: {e2}")
-        return {"status": "ok", "message": f"Close position submitted for {symbol}"}
-    except Exception as e:
-        print(f"Error closing position: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to close position: {e}")
-
-# if __name__ == "__main__":
-#     print(json.dumps(run_once(), indent=2))
+    // Initial load
+    if (!getStoredKey()) {
+        showApiKeyModal();
+    } else {
+        fetchStatus();
+        fetchMiniChart();
+        fetchHistory();
+        fetchAiLogs();
+    }
+  </script>
+</body>
+</html>
