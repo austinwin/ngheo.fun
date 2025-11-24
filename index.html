@@ -456,6 +456,11 @@
             const date = new Date(log.timestamp);
             const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
             const signal = log.signal_output || {};
+            let trade_id = log.trade_id || 'N/A';
+            if (trade_id.length >= 10) trade_id = 'Trade';
+            
+            const tradeIdColor = trade_id === 'Trade' ? 'text-green-400' : 'text-yellow-400';
+
             const direction = log.direction || signal.signal || 'N/A';
             const isLong = direction === 'LONG';
             const colorClass = isLong ? 'text-green-400' : (direction === 'SHORT' ? 'text-red-400' : 'text-white');
@@ -482,6 +487,9 @@
                 </div>
                 
                 <div class="flex flex-wrap gap-2 text-[10px] uppercase tracking-wide opacity-70">
+                    <div class="px-2 py-1 rounded bg-black/20 border border-white/5">
+                        AI Action: <span class="font-bold ${tradeIdColor}">${trade_id}</span>
+                    </div>
                     <div class="px-2 py-1 rounded bg-black/20 border border-white/5">
                         Conf: <span class="font-bold text-white">${confidence}</span>
                     </div>
