@@ -220,14 +220,14 @@
             <div class="col-span-12">
               <label class="block text-[10px] font-bold uppercase tracking-wide mb-1 opacity-70">Pair</label>
               <select id="pair" class="w-full px-2 py-2 rounded-lg bg-white/10 border border-white/15 focus:border-violet-500 focus:outline-none text-sm">
-                <option>SOL/USD</option>
-                <option>BTC/USD</option>
-                <option>ETH/USD</option>
-                <option>XRP/USD</option>
-                <option>HYPE/USD</option>
-                <option>ZEC/USD</option>
-                <option>PUMP/USD</option>
-                <option>BCH/USD</option>
+                <option value="SOL/USD">SOL/USD (Max 20x)</option>
+                <option value="BTC/USD">BTC/USD (Max 40x)</option>
+                <option value="ETH/USD">ETH/USD (Max 20x)</option>
+                <option value="XRP/USD">XRP/USD (Max 20x)</option>
+                <option value="HYPE/USD">HYPE/USD (Max 10x)</option>
+                <option value="ZEC/USD">ZEC/USD (Max 10x)</option>
+                <option value="PUMP/USD">PUMP/USD (Max 10x)</option>
+                <option value="BCH/USD">BCH/USD (Max 10x)</option>
               </select>
             </div>
 
@@ -1072,7 +1072,7 @@
                 <span class="opacity-50 uppercase tracking-wider text-[10px]">Longs</span>
                 <span class="font-mono font-bold text-green-400">${openLongCount}</span>
             </div>
-            <div class="px-2 py-1 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2" title="Shorts Opened (${rangeLabel})">
+            <div class="px-2 py-1 rounded-lg bg
                 <span class="opacity-50 uppercase tracking-wider text-[10px]">Shorts</span>
                 <span class="font-mono font-bold text-red-400">${openShortCount}</span>
             </div>
