@@ -538,6 +538,21 @@
 
     function initPairs() {
         updatePairDropdown();
+        // Fetch metadata in background to populate leverage info
+        fetchPairsData().then(() => {
+            updatePairDropdown();
+        });
+    }
+
+    async function fetchPairsData() {
+        try {
+            const res = await axios.get(`${getApiBase()}/pairs`);
+            allPairsData = res.data;
+            return allPairsData;
+        } catch (err) {
+            console.error("Failed to fetch pairs metadata", err);
+            return [];
+        }
     }
 
     function updatePairDropdown() {
@@ -545,8 +560,10 @@
         const currentVal = select.value;
         
         select.innerHTML = activePairs.map(p => {
-            // We don't have max leverage here easily without fetching, so we just show symbol
-            return `<option value="${p}/USD">${p}/USD</option>`;
+            const meta = allPairsData.find(x => x.name === p);
+            // Use a clean format for leverage
+            const levInfo = meta ? ` (${meta.max_leverage}x)` : '';
+            return `<option value="${p}/USD">${p}/USD${levInfo}</option>`;
         }).join('');
         
         // Try to restore selection, or default to first
@@ -584,12 +601,11 @@
         const container = document.getElementById('pair-table-body');
         container.innerHTML = '<div class="text-center py-8 opacity-50"><i class="fas fa-circle-notch spin"></i> Fetching market data...</div>';
         
-        try {
-            const res = await axios.get(`${getApiBase()}/pairs`);
-            allPairsData = res.data;
+        const data = await fetchPairsData();
+        if (data.length > 0) {
             renderPairTable();
-        } catch (err) {
-            container.innerHTML = `<div class="text-center py-8 text-red-400">Failed to load pairs: ${err.message}</div>`;
+        } else {
+             container.innerHTML = `<div class="text-center py-8 text-red-400">Failed to load pairs data.</div>`;
         }
     }
 
