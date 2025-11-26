@@ -1127,7 +1127,7 @@
                         <th class="p-3 cursor-pointer hover:text-white" onclick="sortPositions('pair')">Pair ${getSortIcon('pair')}</th>
                         <th class="p-3 cursor-pointer hover:text-white" onclick="sortPositions('open_time')">Open Time ${getSortIcon('open_time')}</th>
                         <th class="p-3 text-right cursor-pointer hover:text-white" onclick="sortPositions('entry_price')">Entry ${getSortIcon('entry_price')}</th>
-                        <th class="p-3 text-right cursor-pointer hover:text-white" onclick="sortPositions('margin_used')">Init Margin ${getSortIcon('margin_used')}</th>
+                        <th class="p-3 text-right cursor-pointer hover:text-white" onclick="sortPositions('margin_used')" Margin ${getSortIcon('margin_used')}</th>
                         <th class="p-3 text-right cursor-pointer hover:text-white" onclick="sortPositions('roi')">% ROI ${getSortIcon('roi')}</th>
                         <th class="p-3 text-right cursor-pointer hover:text-white" onclick="sortPositions('liquidation_price')">Liq Price ${getSortIcon('liquidation_price')}</th>
                         <th class="p-3 text-right cursor-pointer hover:text-white" onclick="sortPositions('tp_price')">TP ${getSortIcon('tp_price')}</th>
@@ -1166,7 +1166,7 @@
                             <td class="p-3 text-center" onclick="event.stopPropagation()">
                                 <div class="flex items-center justify-center gap-2">
                                     <button onclick="closePosition('${pos.pair}')" class="p-1.5 rounded bg-red-500/20 hover:bg-red-500/40 text-red-400 transition-colors" title="Close Position">
-                                        <i class="fas fa-times"></i>
+                                        <i class="fas fa-door-open"></i>
                                     </button>
                                     <button onclick="cancelOpenOrders('${pos.pair}')" class="p-1.5 rounded bg-amber-500/20 hover:bg-amber-500/40 text-amber-400 transition-colors" title="Cancel Orders">
                                         <i class="fas fa-ban"></i>
