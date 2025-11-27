@@ -1073,7 +1073,7 @@
 
                 return `
                 <div class="glass rounded-xl p-4 border-l-4 ${isLong ? 'border-green-500' : 'border-red-500'} hover:bg-white/5 transition-colors" onclick="selectPair('${pos.pair}')">
-                    <div class="flex justify-between items-start mb-2">
+                    <div class="flex justify-between items-center mb-2 pb-2 border-b border-white/5">
                         <div>
                             <div class="font-bold text-base flex items-center gap-2">
                                 ${pos.pair}
@@ -1827,6 +1827,7 @@
           };
           
           changesEl.innerHTML = `
+            <span title="3h Change">3h: ${fmt(data.changes.change_3h)}</span>
             <span title="6h Change">6h: ${fmt(data.changes.change_6h)}</span>
             <span title="12h Change">12h: ${fmt(data.changes.change_12h)}</span>
             <span title="24h Change">24h: ${fmt(data.changes.change_24h)}</span>
