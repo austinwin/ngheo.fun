@@ -235,7 +235,10 @@
                                 <span class="text-[9px] uppercase font-bold opacity-40 transition-colors" id="counter-trade-label">Norm</span>
                             </div>
                         </div>
-                        <div id="bot-status-text" class="text-[10px] opacity-50 whitespace-nowrap leading-none mt-0.5">System Idle</div>
+                        <div class="flex justify-between items-center mt-0.5 pr-1">
+                             <div id="bot-status-text" class="text-[10px] opacity-50 whitespace-nowrap leading-none">System Idle</div>
+                             <div id="market-changes" class="flex gap-2 text-[9px] font-mono opacity-70"></div>
+                        </div>
                     </div>
                  </div>
              </div>
@@ -936,16 +939,16 @@
                 contentHtml = `
                     <div class="grid grid-cols-2 gap-2 text-xs mt-2">
                         <div class="bg-white/5 rounded p-2 border border-white/5">
-                            <div class="opacity-50 text-[10px] uppercase tracking-wide">Leverage</div>
+                            <div class="opacity-40 text-[10px] uppercase tracking-wide">Leverage</div>
                             <div class="font-mono font-bold">${bot.leverage}x</div>
                         </div>
                         <div class="bg-white/5 rounded p-2 border border-white/5">
-                            <div class="opacity-50 text-[10px] uppercase tracking-wide">Size</div>
+                            <div class="opacity-40 text-[10px] uppercase tracking-wide">Size</div>
                             <div class="font-mono font-bold">$${bot.trade_size_usd}</div>
                         </div>
                         ${bot.take_profit ? `
                         <div class="bg-white/5 rounded p-2 border border-white/5">
-                            <div class="opacity-50 text-[10px] uppercase tracking-wide">TP</div>
+                            <div class="opacity-40 text-[10px] uppercase tracking-wide">TP</div>
                             <div class="font-mono font-bold text-blue-300">$${formatPrice(bot.take_profit)}</div>
                         </div>` : ''}
                     </div>
@@ -1123,7 +1126,7 @@
         <div class="hidden md:block overflow-x-auto">
             <table class="w-full text-left border-collapse">
                 <thead>
-                    <tr class="text-[10px] font-bold uppercase tracking-wider opacity-60 border-b border-white/10 select-none">
+                    <tr class="text-[10px] font-bold uppercase tracking-wider opacity-50 border-b border-white/10 select-none">
                         <th class="p-3 cursor-pointer hover:text-white" onclick="sortPositions('pair')">Pair ${getSortIcon('pair')}</th>
                         <th class="p-3 cursor-pointer hover:text-white" onclick="sortPositions('open_time')">Open Time ${getSortIcon('open_time')}</th>
                         <th class="p-3 text-right cursor-pointer hover:text-white" onclick="sortPositions('entry_price')">Entry ${getSortIcon('entry_price')}</th>
@@ -1812,6 +1815,24 @@
       const positionEl = document.getElementById('status-open-position');
       const ordersEl = document.getElementById('status-open-orders');
       const pair = data.pair || (document.getElementById("pair")?.value?.split("/")[0] || "");
+      
+      // Update Market Changes
+      const changesEl = document.getElementById('market-changes');
+      if (changesEl && data.changes) {
+          const fmt = (val) => {
+              const v = parseFloat(val);
+              const color = v >= 0 ? 'text-green-400' : 'text-red-400';
+              const sign = v >= 0 ? '+' : '';
+              return `<span class="${color}">${sign}${v.toFixed(2)}%</span>`;
+          };
+          
+          changesEl.innerHTML = `
+            <span title="6h Change">6h: ${fmt(data.changes.change_6h)}</span>
+            <span title="12h Change">12h: ${fmt(data.changes.change_12h)}</span>
+            <span title="24h Change">24h: ${fmt(data.changes.change_24h)}</span>
+          `;
+      }
+
       // Current Price
       const price = parseFloat(data.current_price);
       priceEl.innerHTML = `
