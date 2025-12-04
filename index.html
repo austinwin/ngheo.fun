@@ -877,9 +877,8 @@ select option {
     let lastAiSignal = null; // Store last AI signal for modal execution
     let counterTradeActive = false; // New state
     let aiFlipActive = false; // New state for AI Flip
-    let autoConfigActive = false; // New state for Auto Config
-    let dynamicTpActive = false; // New state for Dynamic TP
-    let hardStopLossActive = false; // New state for Hard Stop Loss
+    let autoConfigActive = false; // New state for Dynamic TP
+    let dynamicTpActive = false; // New state for Hard Stop Loss
     
     // Debounce utility
     function debounce(func, wait) {
@@ -1527,7 +1526,16 @@ select option {
                 const pnlColor = pos.unrealized_pnl >= 0 ? "text-green-400" : "text-red-400";
                 const roi = pos.roi.toFixed(2) + "%";
                 const pnl = formatUSD(pos.unrealized_pnl, true);
-                
+
+                // <-- Added: compute TP display safely to avoid ReferenceError when tpDisplay was missing
+                const tpValue = (pos.tp_price !== undefined && pos.tp_price !== null) ? pos.tp_price : (bot.take_profit !== undefined ? bot.take_profit : null);
+                const tpDisplay = tpValue ? `
+                    <div class="flex justify-between items-center">
+                        <span class="opacity-50 text-[10px] uppercase">TP</span>
+                        <span class="font-mono text-blue-300">${formatUSD(tpValue)}</span>
+                    </div>
+                ` : '';
+
                 contentHtml = `
                     <div class="mt-3 pt-3 border-t border-white/5 grid grid-cols-2 gap-y-2 gap-x-4 text-xs">
                         <div class="flex justify-between items-center">
@@ -1546,7 +1554,7 @@ select option {
                             <span class="opacity-50 text-[10px] uppercase">Liq</span>
                             <span class="font-mono text-orange-400">${formatUSD(pos.liquidation_price)}</span>
                         </div>
-                                                                                             ${tpDisplay}
+                                                                                                 ${tpDisplay}
                         <div class="flex justify-between items-center">
                             <span class="opacity-50 text-[10px] uppercase">Margin</span>
                             <span class="font-mono">${formatUSD(pos.margin_used)}</span>
@@ -2609,7 +2617,7 @@ select option {
       if (changesEl && data.changes) {
           const fmt = (val) => {
               const v = parseFloat(val);
-              const color = v >= 0 ? 'text-green-400' : 'text-red-400';
+              const color = v >=  0 ? 'text-green-400' : 'text-red-400';
               const sign = v >= 0 ? '+' : '';
               return `<span class="${color} font-bold">${sign}${v.toFixed(2)}%</span>`;
           };
