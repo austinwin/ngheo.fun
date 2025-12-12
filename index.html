@@ -3232,17 +3232,24 @@ select option {
         // 3m: 40 candles = 2 hours (but let's keep 60 for 3h history which is better context)
         const limit = chartInterval === '1m' ? 120 : 60;
         
-        const res = await axios.get(`${getApiBase()}/ohlcv?symbol=${symbol}&interval=${chartInterval}&limit=${limit}`);
-        const data = res.data || [];
+        // Fetch OHLCV and FGI history in parallel
+        const [ohlcvRes, fgiRes] = await Promise.all([
+            axios.get(`${getApiBase()}/ohlcv?symbol=${symbol}&interval=${chartInterval}&limit=${limit}`),
+            axios.get(`${getApiBase()}/fgi/history?interval=15m&last_hours=4`)
+        ]);
+
+        const data = ohlcvRes.data || [];
+        const fgiData = fgiRes.data || [];
+
         if (!Array.isArray(data) || data.length === 0) return;
 
-        drawMiniChart(data, pair);
+        drawMiniChart(data, pair, fgiData);
       } catch (err) {
         console.error("Failed to fetch mini chart:", err);
       }
     }
 
-    function drawMiniChart(data, pair) {
+    function drawMiniChart(data, pair, fgiData = []) {
       const canvas = document.getElementById("mini-chart");
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
@@ -3263,12 +3270,12 @@ select option {
       const padTop = 10;
       const padBottom = 20;
       const padRight = 50; // Space for price labels
-      const padLeft = 5;
+      const padLeft = 30; // Increased for FGI labels
 
       const chartW = w - padLeft - padRight;
       const chartH = h - padTop - padBottom;
 
-      // Min/Max
+      // Min/Max for Price
       let minP = Infinity, maxP = -Infinity;
       data.forEach(d => {
         if (d.low < minP) minP = d.low;
@@ -3282,6 +3289,19 @@ select option {
 
       const xFor = (i) => padLeft + (i * (chartW / data.length)) + ((chartW / data.length) / 2);
       const yFor = (p) => padTop + chartH - ((p - minP) / paddedRange) * chartH;
+
+      // Min/Max for FGI
+      let minFgi = 0, maxFgi = 100;
+      if (fgiData.length > 0) {
+          const values = fgiData.map(d => d.fgi_value);
+          minFgi = Math.min(...values);
+          maxFgi = Math.max(...values);
+          const fRange = maxFgi - minFgi || 1;
+          minFgi = Math.max(0, minFgi - fRange * 0.1);
+          maxFgi = Math.min(100, maxFgi + fRange * 0.1);
+      }
+      const fgiRange = maxFgi - minFgi || 1;
+      const yForFgi = (val) => padTop + chartH - ((val - minFgi) / fgiRange) * chartH;
 
       // Draw Grid & Axes
       ctx.font = "10px sans-serif";
@@ -3299,10 +3319,19 @@ select option {
         ctx.lineTo(w - padRight, y);
         ctx.stroke();
 
-        // Label
+        // Price Label (Right)
         ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
         ctx.textAlign = "left";
         ctx.fillText(formatPrice(p), w - padRight + 5, y + 3);
+
+        // FGI Label (Left Axis)
+        if (fgiData.length > 0) {
+            const fVal = minFgi + (i * (fgiRange / (numYTicks - 1)));
+            const yF = yForFgi(fVal);
+            ctx.fillStyle = "#a78bfa"; // violet-400
+            ctx.textAlign = "right";
+            ctx.fillText(Math.round(fVal), padLeft - 5, yF + 3);
+        }
       }
 
       // X-Axis (Time) - 6 ticks
@@ -3356,6 +3385,38 @@ select option {
         ctx.fillRect(x - candleW / 2, bodyY, candleW, bodyH);
       });
 
+      // Draw FGI Line
+      if (fgiData.length > 0) {
+          ctx.beginPath();
+          ctx.strokeStyle = '#a78bfa'; // violet-400
+          ctx.lineWidth = 2;
+          
+          const xStart = xFor(0);
+          const xEnd = xFor(data.length - 1);
+          const tStart = new Date(data[0].time).getTime();
+          const tEnd = new Date(data[data.length - 1].time).getTime();
+          const tRange = tEnd - tStart;
+          const xRange = xEnd - xStart;
+
+          let firstPoint = true;
+          fgiData.forEach(d => {
+              const t = new Date(d.datetime).getTime();
+              if (t < tStart || t > tEnd) return;
+              
+              const pct = (t - tStart) / tRange;
+              const x = xStart + (pct * xRange);
+              const y = yForFgi(d.fgi_value);
+              
+              if (firstPoint) {
+                  ctx.moveTo(x, y);
+                  firstPoint = false;
+              } else {
+                  ctx.lineTo(x, y);
+              }
+          });
+          ctx.stroke();
+      }
+
       // Current Price Line & Label
       const last = data[data.length - 1];
       const yLast = yFor(last.close);
@@ -3373,7 +3434,6 @@ select option {
       ctx.fillStyle = "#fbbf24";
       ctx.textAlign = "left";
       ctx.fillText(formatPrice(last.close), w - padRight + 5, yLast + 3);
-
       // Update Header Label
       const labelEl = document.getElementById("mini-chart-label");
       if (labelEl) {
@@ -3470,8 +3530,8 @@ select option {
                     else if (data.fgi_sentiment.includes('GREED')) colorClass = 'text-green-400';
                     
                     let sentimentText = data.fgi_sentiment;
-                    if (sentimentText === 'EXTREME FEAR') sentimentText = 'EX.FEAR';
-                    if (sentimentText === 'EXTREME GREED') sentimentText = 'EX.GREED';
+                    if (sentimentText === 'XFEAR') sentimentText = 'EX.FEAR';
+                    if (sentimentText === 'XGREED') sentimentText = 'EX.GREED';
 
                     el.innerHTML = `<span class="opacity-50 mb-0.5">${interval}</span><span class="${colorClass} font-bold">${sentimentText}(${data.fgi_value})</span>`;
                 }
