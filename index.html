@@ -839,6 +839,23 @@ select option {
             <p class="text-xs opacity-60">Uses a specialized prompt structure for AI analysis.</p>
             <span id="customprompt-label" class="hidden"></span>
         </div>
+                <div>
+            <div class="flex items-center justify-between mb-1">
+                <span class="font-bold text-sm text-orange-400">FGI Thresholds</span>
+            </div>
+            <div class="flex gap-2 mt-2">
+                              <div class="flex-1">
+                    <label class="text-[10px] uppercase opacity-60 block mb-1">Lower (Fear)</label>
+                    <input type="number" id="fgi-lower-input" value="38" class="w-full px-2 py-1 rounded bg-white/10 border border-white/10 text-sm text-center focus:border-orange-400 focus:outline-none" onchange="updateFgiSettings()">
+                </div>
+                <div class="flex-1">
+                    <label class="text-[10px] uppercase opacity-60 block mb-1">Upper (Greed)</label>
+                    <input type="number" id="fgi-upper-input" value="62" class="w-full px-2 py-1 rounded bg-white/10 border border-white/10 text-sm text-center focus:border-orange-400 focus:outline-none" onchange="updateFgiSettings()">
+                </div>
+
+            </div>
+            <p class="text-xs opacity-60 mt-1">above Upper (Greed) and below Lower (Fear) will be traded</p>
+        </div>
       </div>
     </div>
   </div>
@@ -933,11 +950,11 @@ select option {
                  </button>
 
                  <!-- Switches Button -->
-<button onclick="openSwitchesInfo()"
-        class="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 rounded-xl bg-white/5 hover:bg-white/10 border border-amber-400/30 transition-all group shadow-sm">
-  <i class="fas fa-cog text-amber-400 text-sm group-hover:scale-110 transition-transform"></i>
-  <span class="text-xs font-bold text-amber-300">Config</span>
-</button>
+                <button onclick="openSwitchesInfo()"
+                        class="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 rounded-xl bg-white/5 hover:bg-white/10 border border-amber-400/30 transition-all group shadow-sm">
+                  <i class="fas fa-cog text-amber-400 text-sm group-hover:scale-110 transition-transform"></i>
+                  <span class="text-xs font-bold text-amber-300">Config</span>
+                </button>
              </div>
           </div>
 
@@ -1291,7 +1308,8 @@ select option {
     let hardStopLossActive = false; // New state for Hard Stop Loss
     let customPromptActive = false; // New state for Custom Prompt
     let recheckTpActive = false; // New state for Recheck TP
-
+    let fgiUpper = 62;
+    let fgiLower = 38;
     // Debounce utility
     function debounce(func, wait) {
       let timeout;
@@ -1684,6 +1702,13 @@ select option {
             label.classList.add('opacity-40');
             label.classList.remove('text-emerald-400', 'opacity-100');
         }
+    }
+    function updateFgiSettings() {
+        const upper = parseInt(document.getElementById('fgi-upper-input').value);
+        const lower = parseInt(document.getElementById('fgi-lower-input').value);
+        
+        if (!isNaN(upper)) fgiUpper = upper;
+        if (!isNaN(lower)) fgiLower = lower;
     }
 
     // --- Tab Logic ---
@@ -2196,6 +2221,14 @@ select option {
                 <div class="flex justify-between border-b border-white/5 pb-1">
                     <span class="opacity-60">Custom Prompt</span>
                     <span class="font-mono ${bot.using_custom_prompt ? 'text-emerald-400' : ''}">${bot.using_custom_prompt}</span>
+                </div>
+                                <div class="flex justify-between border-b border-white/5 pb-1">
+                    <span class="opacity-60">FGI Upper</span>
+                    <span class="font-mono text-orange-400">${bot.fgi_upper !== undefined ? bot.fgi_upper : 'N/A'}</span>
+                </div>
+                <div class="flex justify-between border-b border-white/5 pb-1">
+                    <span class="opacity-60">FGI Lower</span>
+                    <span class="font-mono text-orange-400">${bot.fgi_lower !== undefined ? bot.fgi_lower : 'N/A'}</span>
                 </div>
             </div>
 
@@ -3575,33 +3608,44 @@ select option {
             
             // Sync counter trade status if bot is running
             if (data.running) {
-                if (counterTradeActive !== data.counter_trade) {
-                    counterTradeActive = data.counter_trade;
-                    updateCounterTradeUI();
-                }
-                if (aiFlipActive !== data.aiflip) {
-                    aiFlipActive = data.aiflip;
-                    updateAiFlipUI();
-                }
-                if (autoConfigActive !== data.auto_config) {
-                    autoConfigActive = data.auto_config;
-                    updateAutoConfigUI();
-                }
-                if (dynamicTpActive !== data.dynamic_tp) {
-                    dynamicTpActive = data.dynamic_tp;
-                    updateDynamicTpUI();
-                }
-                if (recheckTpActive !== data.recheck_tp) {
-                    recheckTpActive = data.recheck_tp;
-                    updateRecheckTpUI();
-                }
-                if (hardStopLossActive !== data.hard_stop_loss) {
-                    hardStopLossActive = data.hard_stop_loss;
-                    updateHardStopLossUI();
-                }
-                if (customPromptActive !== data.using_custom_prompt) {
-                    customPromptActive = data.using_custom_prompt;
-                    updateCustomPromptUI();
+                const isSwitchesModalOpen = document.getElementById('switches-info-modal').classList.contains('show');
+                if (!isSwitchesModalOpen) {
+                  if (counterTradeActive !== data.counter_trade) {
+                      counterTradeActive = data.counter_trade;
+                      updateCounterTradeUI();
+                  }
+                  if (aiFlipActive !== data.aiflip) {
+                      aiFlipActive = data.aiflip;
+                      updateAiFlipUI();
+                  }
+                  if (autoConfigActive !== data.auto_config) {
+                      autoConfigActive = data.auto_config;
+                      updateAutoConfigUI();
+                  }
+                  if (dynamicTpActive !== data.dynamic_tp) {
+                      dynamicTpActive = data.dynamic_tp;
+                      updateDynamicTpUI();
+                  }
+                  if (recheckTpActive !== data.recheck_tp) {
+                      recheckTpActive = data.recheck_tp;
+                      updateRecheckTpUI();
+                  }
+                  if (hardStopLossActive !== data.hard_stop_loss) {
+                      hardStopLossActive = data.hard_stop_loss;
+                      updateHardStopLossUI();
+                  }
+                  if (customPromptActive !== data.using_custom_prompt) {
+                      customPromptActive = data.using_custom_prompt;
+                      updateCustomPromptUI();
+                  }
+                                  if (data.fgi_upper !== undefined) {
+                      fgiUpper = data.fgi_upper;
+                      document.getElementById('fgi-upper-input').value = fgiUpper;
+                  }
+                  if (data.fgi_lower !== undefined) {
+                      fgiLower = data.fgi_lower;
+                      document.getElementById('fgi-lower-input').value = fgiLower;
+                  }
                 }
             }else {
                 // Reset defaults if bot is not running
@@ -3691,7 +3735,9 @@ select option {
             dynamic_tp: dynamicTpActive, // Send Dynamic TP flag
             recheck_tp: recheckTpActive, // Send Recheck TP flag
             hard_stop_loss: hardStopLossActive, // Send Hard Stop Loss flag
-            using_custom_prompt: customPromptActive // Send Custom Prompt flag
+            using_custom_prompt: customPromptActive, // Send Custom Prompt flag
+            fgi_upper: fgiUpper,
+            fgi_lower: fgiLower
           };
 
         try {
