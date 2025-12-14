@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>ngheo.fun</title>
+  <title>Ngheo.fun</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
   <!-- Chart.js & Date Adapter -->
@@ -890,7 +890,7 @@ select option {
         <div class="glass rounded-2xl p-4 md:p-6 glow">
           <div class="flex items-center justify-between mb-4 gap-4">
             <h2 class="text-xl md:text-2xl font-bold flex items-center gap-2">
-              <i class="fas fa-chart-line text-green-400"></i> hyperNgheo
+              <i class="fas fa-chart-line text-green-400"></i> HyperNgheo
             </h2>
             <div class="flex gap-2 text-xs md:text-sm">
               <button id="btn-close-position" class="px-3 py-1.5 rounded-lg bg-red-600/80 hover:bg-red-700 flex items-center gap-1" onclick="closePosition()">
@@ -1182,7 +1182,7 @@ select option {
 
     <!-- Footer -->
     <div class="text-center mt-6 opacity-60 text-xs md:text-sm">
-      <p>hyper ngheo @ 2025 • <span id="clock"></span></p>
+      <p>Hyper Ngheo @ 2025 • <span id="clock"></span></p>
     </div>
   </div>
 
@@ -3238,7 +3238,7 @@ select option {
       } else {
         if (overlayEl) overlayEl.classList.add('hidden');
       }
-    }
+  }
 
     async function fetchStatus() {
       try {
@@ -3490,7 +3490,8 @@ select option {
         const promises = [
             fetchStatus(),
             fetchBotStatus(),
-            fetchMiniChart()
+            fetchMiniChart(),
+            fetchMarketSentiment()
         ];
 
         // Conditional fetches based on active tab
@@ -3553,29 +3554,36 @@ select option {
     let pollingTimer = null;
     async function fetchMarketSentiment() {
         const intervals = ['15m', '1h', '4h', '1d'];
-        
-        for (const interval of intervals) {
+        const pair = document.getElementById("pair").value;
+        const symbol = pair ? pair.split('/')[0] : 'SOL';
+        // Use Promise.all for parallel fetching
+        await Promise.all(intervals.map(async (interval) => {
             try {
-                const res = await axios.get(`${getApiBase()}/fgi?interval=${interval}`);
+                const res = await axios.get(`${getApiBase()}/fgi?interval=${interval}&symbol=${symbol}`);
                 const data = res.data;
                 
                 const el = document.getElementById(`fgi-${interval}`);
                 if (el) {
                     let colorClass = 'text-white';
-                    if (data.fgi_sentiment.includes('FEAR')) colorClass = 'text-red-400';
-                    else if (data.fgi_sentiment.includes('GREED')) colorClass = 'text-green-400';
+                    const sentiment = data.fgi_sentiment || 'UNKNOWN';
                     
-                    let sentimentText = data.fgi_sentiment;
+                    if (sentiment.includes('FEAR')) colorClass = 'text-red-400';
+                    else if (sentiment.includes('GREED')) colorClass = 'text-green-400';
+                    else if (sentiment === 'NEUTRAL') colorClass = 'text-gray-300';
+                    
+                    let sentimentText = sentiment;
                     if (sentimentText === 'XFEAR') sentimentText = 'EX.FEAR';
                     if (sentimentText === 'XGREED') sentimentText = 'EX.GREED';
 
-                    el.innerHTML = `<span class="opacity-50 mb-0.5">${interval}</span><span class="${colorClass} font-bold">${sentimentText}(${data.fgi_value})</span>`;
+                    el.innerHTML = `<span class="opacity-50 mb-0.5">${interval}</span><span class="${colorClass} font-bold whitespace-nowrap">${sentimentText} (${data.fgi_value})</span>`;
                 }
             } catch (e) {
                 console.error(`Error fetching FGI for ${interval}:`, e);
+                const el = document.getElementById(`fgi-${interval}`);
+                if(el) el.innerHTML = `<span class="opacity-50 mb-0.5">${interval}</span><span class="opacity-30">--</span>`;
             }
+          }));
         }
-    }
     async function startPolling() {
         if (pollingTimer) clearTimeout(pollingTimer);
         
