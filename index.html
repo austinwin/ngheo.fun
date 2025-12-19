@@ -3660,11 +3660,13 @@ function updatePairDropdown() {
 
         if (!miniCanvas || !miniTooltip || !miniLine) return;
 
-        miniCanvas.addEventListener("mousemove", (e) => {
+        let lastIdx = -1;
+
+        const handleMove = (clientX, isTouch = false) => {
             if (!lastMiniChartData || lastMiniChartData.length === 0) return;
             
             const rect = miniCanvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
+            const x = clientX - rect.left;
             
             const padLeft = 30;
             const padRight = 50;
@@ -3673,11 +3675,18 @@ function updatePairDropdown() {
             if (x < padLeft || x > rect.width - padRight) {
                 miniTooltip.classList.add("hidden");
                 miniLine.classList.add("hidden");
+                lastIdx = -1;
                 return;
             }
 
             const idx = Math.floor(((x - padLeft) / chartW) * lastMiniChartData.length);
             if (idx < 0 || idx >= lastMiniChartData.length) return;
+
+            // Haptic feedback when moving to a new data point
+            if (isTouch && idx !== lastIdx && window.navigator && window.navigator.vibrate) {
+                window.navigator.vibrate(10); // Short 10ms pulse
+            }
+            lastIdx = idx;
 
             const d = lastMiniChartData[idx];
             
@@ -3721,11 +3730,29 @@ function updatePairDropdown() {
             
             const candleX = padLeft + (idx * (chartW / lastMiniChartData.length)) + ((chartW / lastMiniChartData.length) / 2);
             miniLine.style.left = candleX + "px";
+        };
+
+        miniCanvas.addEventListener("mousemove", (e) => {
+            handleMove(e.clientX, false);
         });
+
+        miniCanvas.addEventListener("touchstart", (e) => {
+            if (e.touches.length > 0) {
+                handleMove(e.touches[0].clientX, true);
+            }
+        }, { passive: true });
+
+        miniCanvas.addEventListener("touchmove", (e) => {
+            if (e.touches.length > 0) {
+                handleMove(e.touches[0].clientX, true);
+                if (e.cancelable) e.preventDefault();
+            }
+        }, { passive: false });
 
         miniCanvas.addEventListener("mouseleave", () => {
             miniTooltip.classList.add("hidden");
             miniLine.classList.add("hidden");
+            lastIdx = -1;
         });
     })();
     // Consolidated refresh function
@@ -4486,50 +4513,7 @@ async function openBattleManager() {
         showToast("Failed to add participant", true);
       }
     }
-(function attachTouchTooltip() {
-  if (!canvas || !priceChartInstance) return;
 
-  function showTooltipAt(clientX, clientY) {
-    const rect = canvas.getBoundingClientRect();
-    const x = clientX - rect.left;
-    const y = clientY - rect.top;
-
-    const points = priceChartInstance.getElementsAtEventForMode({x, y}, 'index', {intersect: false}, true);
-    if (!points || points.length === 0) {
-      priceChartInstance.tooltip.setActiveElements([], {x: 0, y: 0});
-    } else {
-      const active = points.map(p => ({datasetIndex: p.datasetIndex, index: p.index}));
-      priceChartInstance.tooltip.setActiveElements(active, {x: clientX, y: clientY});
-    }
-    priceChartInstance.update('none');
-  }
-
-  const touchHandler = (ev) => {
-    if (!ev.touches || ev.touches.length === 0) return;
-    ev.preventDefault();
-    const t = ev.touches[0];
-    showTooltipAt(t.clientX, t.clientY);
-  };
-  const touchEndHandler = (ev) => {
-    priceChartInstance.tooltip.setActiveElements([], {x: 0, y: 0});
-    priceChartInstance.update('none');
-  };
-
-  canvas.addEventListener('touchstart', touchHandler, {passive: false});
-  canvas.addEventListener('touchmove', touchHandler, {passive: false});
-  canvas.addEventListener('touchend', touchEndHandler, {passive: true});
-  canvas.addEventListener('touchcancel', touchEndHandler, {passive: true});
-
-  const pointerHandler = (ev) => {
-    if (ev.pointerType === 'mouse') return;
-    showTooltipAt(ev.clientX, ev.clientY);
-  };
-  canvas.addEventListener('pointermove', pointerHandler, {passive: true});
-  canvas.addEventListener('pointerleave', () => {
-    priceChartInstance.tooltip.setActiveElements([], {x: 0, y: 0});
-    priceChartInstance.update('none');
-  }, {passive: true});
-})();
     async function removeParticipant(session, pair, event) {
         if (event) event.stopPropagation();
         if (!confirm(`Remove ${pair} from ${session}?`)) return;
