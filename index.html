@@ -4486,7 +4486,50 @@ async function openBattleManager() {
         showToast("Failed to add participant", true);
       }
     }
+(function attachTouchTooltip() {
+  if (!canvas || !priceChartInstance) return;
 
+  function showTooltipAt(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    const points = priceChartInstance.getElementsAtEventForMode({x, y}, 'index', {intersect: false}, true);
+    if (!points || points.length === 0) {
+      priceChartInstance.tooltip.setActiveElements([], {x: 0, y: 0});
+    } else {
+      const active = points.map(p => ({datasetIndex: p.datasetIndex, index: p.index}));
+      priceChartInstance.tooltip.setActiveElements(active, {x: clientX, y: clientY});
+    }
+    priceChartInstance.update('none');
+  }
+
+  const touchHandler = (ev) => {
+    if (!ev.touches || ev.touches.length === 0) return;
+    ev.preventDefault();
+    const t = ev.touches[0];
+    showTooltipAt(t.clientX, t.clientY);
+  };
+  const touchEndHandler = (ev) => {
+    priceChartInstance.tooltip.setActiveElements([], {x: 0, y: 0});
+    priceChartInstance.update('none');
+  };
+
+  canvas.addEventListener('touchstart', touchHandler, {passive: false});
+  canvas.addEventListener('touchmove', touchHandler, {passive: false});
+  canvas.addEventListener('touchend', touchEndHandler, {passive: true});
+  canvas.addEventListener('touchcancel', touchEndHandler, {passive: true});
+
+  const pointerHandler = (ev) => {
+    if (ev.pointerType === 'mouse') return;
+    showTooltipAt(ev.clientX, ev.clientY);
+  };
+  canvas.addEventListener('pointermove', pointerHandler, {passive: true});
+  canvas.addEventListener('pointerleave', () => {
+    priceChartInstance.tooltip.setActiveElements([], {x: 0, y: 0});
+    priceChartInstance.update('none');
+  }, {passive: true});
+})();
     async function removeParticipant(session, pair, event) {
         if (event) event.stopPropagation();
         if (!confirm(`Remove ${pair} from ${session}?`)) return;
