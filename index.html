@@ -1102,7 +1102,7 @@ select option {
           <div class="mb-4">
             <div class="flex items-center justify-between mb-1 text-xs opacity-75">
               <div class="flex items-center gap-2">
-                <span class="flex items-center gap-1"><i class="fas fa-chart-bar text-violet-400"></i> Price Action (30mFGI)</span>
+                <span class="flex items-center gap-1"><i class="fas fa-chart-bar text-violet-400"></i> Price Action (15mFGI)</span>
                 <div class="flex bg-white/10 rounded-lg p-0.5">
                   <button onclick="setChartInterval('1m')" id="btn-1m" class="px-2 py-0.5 rounded text-[10px] hover:bg-white/10 transition-colors">1m</button>
                   <button onclick="setChartInterval('3m')" id="btn-3m" class="px-2 py-0.5 rounded text-[10px] bg-violet-500/50 text-white font-bold">3m</button>
@@ -1123,6 +1123,8 @@ select option {
                 </div>
               </div>
               <canvas id="mini-chart" class="w-full" height="180"></canvas>
+              <div id="mini-chart-tooltip" class="absolute hidden pointer-events-none bg-black/95 border border-violet-500/40 p-1.5 rounded text-[9px] z-50 shadow-2xl backdrop-blur-md min-w-[110px]"></div>
+              <div id="mini-chart-line" class="absolute top-2 bottom-2 w-px bg-white/20 hidden pointer-events-none"></div>
             </div>
           </div>
 
@@ -3395,8 +3397,13 @@ function updatePairDropdown() {
         console.error("Failed to fetch mini chart:", err);
       }
     }
-
+    let lastMiniChartData = null;
+    let lastMiniChartFgiData = null;
+    let lastMiniChartPair = null;
     function drawMiniChart(data, pair, fgiData = []) {
+      lastMiniChartData = data;
+      lastMiniChartFgiData = fgiData;
+      lastMiniChartPair = pair;
       const canvas = document.getElementById("mini-chart");
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
@@ -3591,7 +3598,82 @@ function updatePairDropdown() {
         labelEl.innerHTML = `${pair} <span class="${colorClass}">${formatPrice(current)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)</span>`;
       }
     }
-    
+        // Add Tooltip Event Listeners for Mini Chart
+    (function initMiniChartTooltips() {
+        const miniCanvas = document.getElementById("mini-chart");
+        const miniTooltip = document.getElementById("mini-chart-tooltip");
+        const miniLine = document.getElementById("mini-chart-line");
+
+        if (!miniCanvas || !miniTooltip || !miniLine) return;
+
+        miniCanvas.addEventListener("mousemove", (e) => {
+            if (!lastMiniChartData || lastMiniChartData.length === 0) return;
+            
+            const rect = miniCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            
+            const padLeft = 30;
+            const padRight = 50;
+            const chartW = rect.width - padLeft - padRight;
+            
+            if (x < padLeft || x > rect.width - padRight) {
+                miniTooltip.classList.add("hidden");
+                miniLine.classList.add("hidden");
+                return;
+            }
+
+            const idx = Math.floor(((x - padLeft) / chartW) * lastMiniChartData.length);
+            if (idx < 0 || idx >= lastMiniChartData.length) return;
+
+            const d = lastMiniChartData[idx];
+            
+            let closestFgi = null;
+            if (lastMiniChartFgiData && lastMiniChartFgiData.length > 0) {
+                const targetTime = new Date(d.time).getTime();
+                closestFgi = lastMiniChartFgiData.reduce((prev, curr) => {
+                    const currTime = new Date(curr.datetime).getTime();
+                    const prevTime = new Date(prev.datetime).getTime();
+                    return (Math.abs(currTime - targetTime) < Math.abs(prevTime - targetTime) ? curr : prev);
+                });
+            }
+
+            miniTooltip.classList.remove("hidden");
+            miniLine.classList.remove("hidden");
+            
+            const timeStr = new Date(d.time).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+            
+            let html = `
+                <div class="flex justify-between items-center border-b border-white/10 mb-1 pb-0.5 gap-2">
+                    <span class="font-bold text-violet-300">${timeStr}</span>
+                    <span class="font-mono font-bold text-amber-400">${formatPrice(d.close)}</span>
+                </div>
+                <div class="grid grid-cols-2 gap-x-2 gap-y-0">
+                    <div class="flex justify-between gap-1"><span class="opacity-40">O</span><span class="font-mono">${formatPrice(d.open)}</span></div>
+                    <div class="flex justify-between gap-1"><span class="opacity-40">H</span><span class="font-mono text-green-400">${formatPrice(d.high)}</span></div>
+                    <div class="flex justify-between gap-1"><span class="opacity-40">L</span><span class="font-mono text-red-400">${formatPrice(d.low)}</span></div>
+                    ${closestFgi ? `<div class="flex justify-between gap-1"><span class="opacity-40">FGI</span><span class="font-mono text-violet-400">${closestFgi.fgi_value}</span></div>` : ''}
+                </div>
+            `;
+            
+            miniTooltip.innerHTML = html;
+            
+            const tooltipRect = miniTooltip.getBoundingClientRect();
+            let tx = x + 12;
+            if (tx + tooltipRect.width > rect.width) {
+                tx = x - tooltipRect.width - 12;
+            }
+            miniTooltip.style.left = tx + "px";
+            miniTooltip.style.top = "8px";
+            
+            const candleX = padLeft + (idx * (chartW / lastMiniChartData.length)) + ((chartW / lastMiniChartData.length) / 2);
+            miniLine.style.left = candleX + "px";
+        });
+
+        miniCanvas.addEventListener("mouseleave", () => {
+            miniTooltip.classList.add("hidden");
+            miniLine.classList.add("hidden");
+        });
+    })();
     // Consolidated refresh function
     async function refreshDashboard() {
         const pair = document.getElementById("pair").value;
